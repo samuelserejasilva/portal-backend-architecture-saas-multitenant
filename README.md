@@ -8,7 +8,6 @@
 
 ---
 
-## 🏛️ Visão do Produto
 
 O **PortalWeb** é um ecossistema de gestão empresarial (ERP) desenhado para alta performance. Ele unifica a gestão administrativa com a operação de vendas online, permitindo que empresas gerenciem desde o fluxo de caixa até a sincronização de estoques em múltiplos canais de venda.
 
@@ -79,5 +78,4 @@ Gestão de isolamento de dados e segurança.
 
 Autor: Samuel Sereja Silva
 👤 Autor
-Samuel Sereja Silva
 Contador & Arquiteto de Software – Portal Auditoria 2.0
