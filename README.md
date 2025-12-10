@@ -4,7 +4,7 @@
 
 [![Java](https://img.shields.io/badge/Java-21-orange)](https://openjdk.org/projects/jdk/21/)
 [![Spring Modulith](https://img.shields.io/badge/Architecture-Modular%20Monolith-blueviolet)](https://spring.io/projects/spring-modulith)
-[![Architecture](https://img.shields.io/badge/Architecture-SPA%20Clean%20%2B%20Modular-0F766E)](#-ESTRUTURA-BAKEND.md)
+[![Architecture](https://img.shields.io/badge/Architecture-SPA%20Clean%20%2B%20Modular-0F766E)](./ESTRUTURA-BAKEND.md)
 [![Status](https://img.shields.io/badge/Status-Development-yellow)]()
 
 ---
