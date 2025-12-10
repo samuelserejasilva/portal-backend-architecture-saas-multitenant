@@ -17,7 +17,7 @@ A arquitetura segue o padrão **Modular Monolith**, garantindo que módulos comp
 
 ## 📦 Módulos do Sistema
 
-### 1. ⚡ [Módulo Webhooks (Core de Integração)](./modules/webhooks/README.md)
+### 1. ⚡ [Módulo Webhooks (Core de Integração)](./bakend-modulo_webhooks.md)
 O coração da comunicação com o mundo externo.
 * **Função:** Receber notificações de vendas dos Marketplaces (Amazon, Americanas) em tempo real e disparar automações.
 * **Tech:** Validação HMAC, Filas (Redis), Retry Inteligente e DLQ.
