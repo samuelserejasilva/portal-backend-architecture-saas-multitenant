@@ -4,6 +4,7 @@
 
 [![Java](https://img.shields.io/badge/Java-21-orange)](https://openjdk.org/projects/jdk/21/)
 [![Spring Modulith](https://img.shields.io/badge/Architecture-Modular%20Monolith-blueviolet)](https://spring.io/projects/spring-modulith)
+[![Architecture](https://github.com/samuelserejasilva/portal-backend-architecture-saas-multitenant/blob/main/ESTRUTURA-BAKEND.md)](#-visao-de-arquitetura)
 [![Status](https://img.shields.io/badge/Status-Development-yellow)]()
 
 ---
