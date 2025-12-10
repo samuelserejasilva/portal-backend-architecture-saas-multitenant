@@ -30,6 +30,14 @@ Central de conexão com grandes players do e-commerce.
     * **Catalog Sync:** Envio de produtos para Amazon, Americanas (B2W), Magalu.
     * **Stock Sync:** Atualização de preço e estoque em tempo real para evitar "furo de estoque".
     * **Order Import:** Captura automática de pedidos via API.
+ 
+    * ### 2.1 🛒 Módulo Hub Integrador (E-commerce & Dropshipping)
+Central de inteligência para venda de produtos de terceiros (Marketplaces).
+* **Catalog Import (Inbound):** Importação massiva de produtos da Amazon/B2W via API (Product Advertising API).
+* **Price Intelligence:** Monitoramento em tempo real de preços e estoque na origem para precificação dinâmica no Portal.
+* **Checkout Automation:**
+    * *Modo Afiliado:* Geração de links traqueados (tag de parceiro).
+    * *Modo Dropshipping:* Automação de pedidos na loja origem após confirmação de pagamento.
 
 ### 3. 💰 Módulo Financeiro (ERP)
 Gestão completa do fluxo monetário da empresa.
