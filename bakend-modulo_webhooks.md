@@ -1,19 +1,23 @@
-# Modulo Webhooks - Documentacao Tecnica
+# Módulo Webhooks
 
-**Versao**: 1.0.0
-**Modulo**: `modules.webhooks`
-**Package**: `com.auditoria.portalweb.modules.webhooks`
-**Status**: Producao (92% completo)
+**Subsistema de alta disponibilidade para orquestração de eventos (Inbound/Outbound).**
+
+Projetado para operar em escala (Enterprise Ready), este módulo gerencia o ciclo de vida completo de integrações via webhooks, garantindo segurança, resiliência e observabilidade em um ambiente distribuído.
+
+- **Arquitetura:** Event-Driven (Spring Modulith)
+- **Segurança:** Validação HMAC-SHA256 e Rate Limiting Distribuído (Redis)
+- **Resiliência:** Retry Exponencial, Dead Letter Queue (DLQ) e Fallback automático
+- **Observabilidade:** Métricas em tempo real (Micrometer) e Health Checks de Backlog
 
 ---
 
 ## Visao Geral
 
-Sistema completo para recepcao e envio de webhooks via HTTP. Implementa validacao HMAC-SHA256, rate limiting, retry com backoff exponencial, e processamento assincrono. Suporta multi-tenancy e arquitetura event-driven.
+Sistema completo para recepcao e envio de webhooks via HTTP. Implementa validacao HMAC-SHA256, rate limiting, retry com backoff exponencial, processamento assincrono, Dead Letter Queue (DLQ), auditoria de seguranca e metricas com Micrometer. Suporta multi-tenancy e arquitetura event-driven.
 
-**Arquivos**: 33 classes Java
+**Arquivos**: 48 classes Java
 **Testes**: 3 classes de integracao (8 testes)
-**Banco**: 3 tabelas com indices otimizados
+**Banco**: 5 tabelas com indices otimizados
 
 ---
 
@@ -23,30 +27,56 @@ Sistema completo para recepcao e envio de webhooks via HTTP. Implementa validaca
 
 ```
 modules/webhooks/
-├── domain/                    (3 entities)
+├── domain/                    (5 entities)
 │   ├── WebhookReceived.java
 │   ├── WebhookSubscription.java
-│   └── WebhookDelivery.java
-├── repository/                (3 repositories)
-├── internal/                  (10 services + handlers)
+│   ├── WebhookDelivery.java
+│   ├── WebhookDeliveryDlq.java
+│   └── WebhookHmacFailureLog.java
+├── repository/                (5 repositories)
+├── internal/                  (19 services + handlers)
 │   ├── WebhookSenderService.java
 │   ├── WebhookReceiveService.java
 │   ├── WebhookReceivedWorker.java
 │   ├── WebhookRetryScheduler.java
 │   ├── WebhookAdminService.java
+│   ├── WebhookDlqService.java
 │   ├── StripeWebhookHandler.java
 │   ├── AsaasWebhookHandler.java
 │   ├── IncomingWebhookHmacValidator.java
 │   ├── WebhookSecurityProperties.java
-│   └── WebhookRateLimitInterceptor.java
-├── web/                       (5 controllers)
+│   ├── WebhookSecurityAuditService.java
+│   ├── WebhookRateLimitInterceptor.java
+│   ├── WebhookRateLimitConfig.java
+│   ├── WebhookQueueHealthIndicator.java
+│   ├── WebhookMetrics.java
+│   ├── WebhookMetricsUpdater.java
+│   └── ratelimit/
+│       ├── RateLimitService.java (interface)
+│       ├── InMemoryRateLimitService.java
+│       └── RedisRateLimitService.java
+├── web/                       (6 controllers)
 │   ├── WebhookReceiveController.java
 │   ├── WebhookAdminSubscriptionController.java
 │   ├── WebhookAdminDeliveryController.java
 │   ├── WebhookAdminReceivedController.java
-│   └── WebhookExceptionHandler.java
-├── api/dto/                   (4 DTOs)
-├── events/                    (4 event classes + listeners)
+│   ├── WebhookExceptionHandler.java
+│   └── WebhookWebMvcConfig.java
+├── api/dto/                   (1 DTO)
+│   └── WebhookReceiveResponse.java
+├── web/api/dto/               (3 DTOs)
+│   ├── WebhookSubscriptionRequest.java
+│   ├── WebhookSubscriptionResponse.java
+│   └── WebhookDeliveryResponse.java
+├── internal/events/           (2 event classes)
+│   ├── IncomingAsaasWebhookEvent.java
+│   └── IncomingStripeWebhookEvent.java
+├── internal/listener/         (2 listeners)
+│   ├── AsaasWebhookListener.java
+│   └── StripeWebhookListener.java
+├── internal/exception/        (2 exceptions)
+│   ├── WebhookAuthException.java
+│   └── WebhookPayloadTooLargeException.java
 └── package-info.java
 ```
 
@@ -72,6 +102,8 @@ modules/webhooks/
                           [Status: SENT/FAILED/EXHAUSTED]
                                   |
                       [Retry com backoff exponencial]
+                                  |
+                          [EXHAUSTED] ---> [DLQ (WebhookDeliveryDlq)]
 ```
 
 ---
@@ -93,7 +125,7 @@ modules/webhooks/
 | `processedStatus` | Enum | PENDING, PROCESSED, FAILED, DISCARDED |
 | `receivedAt` | LocalDateTime | Timestamp de recepcao |
 | `processedAt` | LocalDateTime | Timestamp de processamento |
-| `errorMessage` | String(1000) | Mensagem de erro |
+| `errorMessage` | String(500) | Mensagem de erro |
 
 **Indices**:
 - `(source, external_id)` - Deteccao de duplicatas
@@ -152,7 +184,42 @@ modules/webhooks/
 - `PENDING` -> Aguardando envio
 - `SENT` -> Enviado com sucesso (HTTP 2xx)
 - `FAILED` -> Falha temporaria (sera retentado)
-- `EXHAUSTED` -> Esgotou tentativas (maximo atingido)
+- `EXHAUSTED` -> Esgotou tentativas (maximo atingido, movido para DLQ)
+
+### 4. WebhookDeliveryDlq (Dead Letter Queue)
+
+**Tabela**: `webhook_delivery_dlq`
+
+| Campo | Tipo | Descricao |
+|-------|------|-----------|
+| `id` | Long | PK auto-incremento |
+| `deliveryId` | Long | ID original da delivery |
+| `subscriptionId` | Long | ID da subscription |
+| `empresaId` | Integer | Multi-tenancy |
+| `eventType` | String(100) | Tipo do evento |
+| `payload` | LONGTEXT | JSON do payload |
+| `lastResponseStatus` | Integer | HTTP status da ultima tentativa |
+| `lastResponseBody` | TEXT | Corpo da resposta (1000 chars) |
+| `attemptCount` | Integer | Numero de tentativas realizadas |
+| `reason` | String(255) | Razao do arquivamento |
+| `createdAt` | LocalDateTime | Timestamp de arquivamento |
+
+**Proposito**: Armazena deliveries EXHAUSTED para analise e possivel reprocessamento manual.
+
+### 5. WebhookHmacFailureLog (Auditoria de Seguranca)
+
+**Tabela**: `webhook_hmac_failure_log`
+
+| Campo | Tipo | Descricao |
+|-------|------|-----------|
+| `id` | Long | PK auto-incremento |
+| `source` | String(50) | Source do webhook tentado |
+| `ip` | String(100) | IP de origem |
+| `userAgent` | String(255) | User-Agent do cliente |
+| `message` | String(255) | Mensagem de erro |
+| `createdAt` | LocalDateTime | Timestamp da falha |
+
+**Proposito**: Registra todas as tentativas de webhook com HMAC invalido para analise de seguranca.
 
 ---
 
@@ -177,8 +244,8 @@ Recebe webhooks de sistemas externos com validacao HMAC.
 ```json
 {
   "id": 123,
-  "source": "stripe",
-  "receivedAt": "2025-12-09T10:30:00.123456"
+  "duplicate": false,
+  "status": "PENDING"
 }
 ```
 
@@ -186,6 +253,7 @@ Recebe webhooks de sistemas externos com validacao HMAC.
 - `202 ACCEPTED` - Webhook recebido e validado
 - `400 BAD REQUEST` - JSON invalido ou source invalido
 - `401 UNAUTHORIZED` - HMAC invalido
+- `413 PAYLOAD TOO LARGE` - Payload excede 1 MB
 - `429 TOO MANY REQUESTS` - Rate limit excedido
 
 **Rate Limiting**:
@@ -198,6 +266,10 @@ Recebe webhooks de sistemas externos com validacao HMAC.
 HMAC-SHA256(payload, secret)
 Header: X-Webhook-Signature: sha256=<hex>
 ```
+
+**Validacao de Payload Size**:
+- Limite: 1 MB (1.048.576 bytes)
+- Response: HTTP 413 (Payload Too Large)
 
 **Exemplo (curl)**:
 ```bash
@@ -268,19 +340,50 @@ POST   /api/v1/admin/webhooks/received/{id}/reprocess Reprocessar
 - Header timestamp: `X-Webhook-Timestamp: 1234567890`
 - Secret: armazenado em `WebhookSubscription.secretKey`
 
-### Rate Limiting
+### Rate Limiting (Strategy Pattern)
 
-**WebhookRateLimitInterceptor**:
-- Chave: `{IP}|{source}`
-- Janela: 60 segundos (deslizante)
-- Limite: 60 requisicoes (configuravel)
-- Storage: In-memory `ConcurrentHashMap`
-- Thread-safe: `synchronized` per key
+**Arquitetura**:
+- **Interface**: `RateLimitService` (Strategy Pattern)
+- **Implementacoes**:
+  - `InMemoryRateLimitService` - Armazenamento local (default)
+  - `RedisRateLimitService` - Armazenamento distribuido (Redis)
+- **Config**: `WebhookRateLimitConfig` seleciona automaticamente via `@ConditionalOnBean`
+- **Interceptor**: `WebhookRateLimitInterceptor` delega para o service
+
+**Estrategias de Rate Limit**:
+
+1. **InMemoryRateLimitService** (default):
+   - Storage: `ConcurrentHashMap` em memoria
+   - Chave: `{IP}|{source}`
+   - Janela: 60 segundos (deslizante)
+   - Thread-safe: `synchronized` per key
+   - Limitacao: Reset ao reiniciar, sem compartilhamento entre instancias
+
+2. **RedisRateLimitService** (producao distribuida):
+   - Storage: Redis com INCR/EXPIRE
+   - Chave: `webhook:ratelimit:{IP}|{source}`
+   - TTL: 60 segundos
+   - Compartilhado entre multiplas instancias
+   - Resiste a restarts
+   - Requer: `spring-boot-starter-data-redis` + `RedisTemplate<String, String>`
 
 **Configuracao**:
 ```properties
+# Limite de requisicoes por minuto
 portalweb.webhooks.receiveRateLimitPerMinute=60
+
+# Estrategia de storage (MEMORY ou REDIS)
+portalweb.webhooks.rate-limit-store=MEMORY  # default
+
+# Para usar Redis (alem de configurar o cliente):
+portalweb.webhooks.rate-limit-store=REDIS
+spring.data.redis.host=localhost
+spring.data.redis.port=6379
 ```
+
+**Fallback Automatico**:
+- Se `rate-limit-store=REDIS` mas Redis nao disponivel: fallback para MEMORY
+- Logs de advertencia para operador
 
 ### Input Validation
 
@@ -291,12 +394,21 @@ portalweb.webhooks.receiveRateLimitPerMinute=60
 
 **Payload**:
 - Deve ser JSON valido
-- Sem limite explicito de tamanho (usa LONGTEXT)
+- Tamanho maximo: 1 MB (1.048.576 bytes)
+- Armazenamento: LONGTEXT (suporta ate 4 GB)
 
 **ExternalId**:
 - Opcional
 - Max 255 caracteres
 - Usado para deteccao de duplicatas
+
+### Auditoria de Seguranca
+
+**WebhookSecurityAuditService**:
+- Registra todas as falhas de HMAC
+- Captura: source, IP, User-Agent, mensagem
+- Armazena em `webhook_hmac_failure_log`
+- Util para analise de tentativas de ataque
 
 ---
 
@@ -391,6 +503,8 @@ portalweb.webhooks.retry-interval-ms=60000
 - Timeout configuravel (default: 10s)
 - Captura status + body da resposta
 - Transacional (`@Transactional`)
+- DLQ integration (arquivamento de EXHAUSTED)
+- Metricas de envio (sucesso/falha/duracao)
 
 **Headers Enviados**:
 ```
@@ -409,7 +523,7 @@ X-Webhook-Signature: sha256=abc123...
 
 2. **Falha (HTTP 4xx/5xx ou Exception)**:
    - Incrementa `attemptCount`
-   - Se `attemptCount >= maxRetries`: Status `EXHAUSTED`, para
+   - Se `attemptCount >= maxRetries`: Status `EXHAUSTED`, arquiva em DLQ
    - Senao: Status `FAILED`, agenda proxima tentativa
 
 **Backoff Exponencial**:
@@ -428,10 +542,22 @@ Tentativa 7+: 43200 segundos (12h, maximo)
 
 **Exemplo de Codigo**:
 ```java
-// Linha 106-108 de WebhookSenderService.java
+// Linha 116-119 de WebhookSenderService.java
 double seconds = 30 * Math.pow(2, Math.max(0, currentAttempt - 1));
 long delaySeconds = (long) Math.min(seconds, 43200); // cap 12h
 delivery.setNextAttemptAt(LocalDateTime.now(UTC).plusSeconds(delaySeconds));
+```
+
+### DLQ Service (WebhookDlqService)
+
+**Funcionalidade**:
+- Arquiva deliveries EXHAUSTED
+- Preserva informacoes de debugging
+- Permite analise de falhas persistentes
+
+**Metodo**:
+```java
+public void archive(WebhookDelivery delivery, String reason)
 ```
 
 ---
@@ -445,12 +571,22 @@ delivery.setNextAttemptAt(LocalDateTime.now(UTC).plusSeconds(delaySeconds));
 portalweb.webhooks.incoming-secrets.stripe=whsec_stripe_secret_123
 portalweb.webhooks.incoming-secrets.asaas=asaas_webhook_key_456
 
-# Rate limiting (requisicoes/minuto)
+# Rate limiting
 portalweb.webhooks.receiveRateLimitPerMinute=60
+portalweb.webhooks.rate-limit-store=MEMORY       # MEMORY ou REDIS
+
+# Redis (se rate-limit-store=REDIS)
+spring.data.redis.host=localhost
+spring.data.redis.port=6379
 
 # Workers (intervalos em milissegundos)
 portalweb.webhooks.worker-interval-ms=30000      # Worker processamento
 portalweb.webhooks.retry-interval-ms=60000       # Scheduler retry
+portalweb.webhooks.metrics-interval-ms=60000     # Atualizacao de metricas
+
+# Health Check (opcional)
+portalweb.webhooks.health.warning-threshold=500
+portalweb.webhooks.health.critical-threshold=1000
 ```
 
 ### Valores Padrao (se nao configurados)
@@ -458,8 +594,12 @@ portalweb.webhooks.retry-interval-ms=60000       # Scheduler retry
 | Propriedade | Valor Padrao |
 |------------|--------------|
 | `receiveRateLimitPerMinute` | 60 |
+| `rate-limit-store` | MEMORY |
 | `worker-interval-ms` | 30000 (30s) |
 | `retry-interval-ms` | 60000 (60s) |
+| `metrics-interval-ms` | 60000 (60s) |
+| `health.warning-threshold` | 500 |
+| `health.critical-threshold` | 1000 |
 | `maxRetries` | 5 (por subscription) |
 | `timeoutSeconds` | 10 (por subscription) |
 
@@ -494,14 +634,24 @@ ALTER TABLE webhook_subscription
   (empresa_id, event_type, target_url);
 ```
 
+**webhook_delivery_dlq**:
+```sql
+-- Sem indices adicionais (tabela de arquivo)
+```
+
+**webhook_hmac_failure_log**:
+```sql
+-- Sem indices adicionais (tabela de auditoria)
+```
+
 ### Tamanhos de Colunas
 
 | Coluna | Tipo | Limite |
 |--------|------|--------|
-| `payload` | LONGTEXT | 4 GB (MySQL) |
+| `payload` | LONGTEXT | 4 GB (MySQL), validado 1 MB |
 | `headers` | LONGTEXT | 4 GB (MySQL) |
 | `lastResponseBody` | TEXT | Truncado 1000 chars |
-| `errorMessage` | String(1000) | Truncado 1000 chars |
+| `errorMessage` | String(500) | Truncado 500 chars |
 | `targetUrl` | String(500) | 500 chars |
 | `source` | String(50) | 50 chars |
 | `externalId` | String(255) | 255 chars |
@@ -564,6 +714,15 @@ Rate limiting via `HandlerInterceptor`.
 ### 8. Strategy Pattern
 Handlers implementam interface comum, descobertos dinamicamente.
 
+### 9. Dead Letter Queue Pattern
+Deliveries EXHAUSTED movidas para tabela DLQ.
+
+### 10. Strategy Pattern (Rate Limiting)
+Multiplas implementacoes (Memory/Redis) com selecao automatica.
+
+### 11. Health Indicator Pattern
+Custom health indicator para monitoramento de backlog.
+
 ---
 
 ## Observabilidade
@@ -595,19 +754,98 @@ log.error("Erro ao enviar delivery id={}: {}", id, e.getMessage());
 log.info("Scheduler encontrou {} deliveries para retry", deliveries.size());
 ```
 
+**WebhookExceptionHandler**:
+```java
+log.warn("Webhook HMAC invalido. ip={} uri={} msg={}", ip, uri, ex.getMessage());
+log.warn("Payload muito grande. ip={} uri={} msg={}", ip, uri, ex.getMessage());
+```
+
+### Metricas Implementadas (Micrometer)
+
+**WebhookMetrics**:
+
+**Counters**:
+- `webhooks.incoming.received` - Total de webhooks recebidos
+- `webhooks.incoming.received{source}` - Webhooks por source
+- `webhooks.incoming.hmac_failures` - Falhas de HMAC
+- `webhooks.incoming.payload_too_large` - Payloads rejeitados
+- `webhooks.outgoing.send.success` - Envios bem-sucedidos
+- `webhooks.outgoing.send.success{eventType}` - Sucesso por tipo
+- `webhooks.outgoing.send.failure` - Envios falhados
+- `webhooks.outgoing.send.failure{eventType}` - Falhas por tipo
+
+**Gauges**:
+- `webhooks.delivery.pending` - Deliveries pendentes
+- `webhooks.received.pending` - Webhooks recebidos pendentes
+
+**Timers**:
+- `webhooks.outgoing.send.duration{eventType,status}` - Duracao dos envios
+
+**WebhookMetricsUpdater**:
+- Atualiza gauges a cada 60 segundos
+- Evita consultas pesadas no banco a cada request
+
+### Health Check (Actuator)
+
+**WebhookQueueHealthIndicator**:
+
+Expoe status de backlog em `/actuator/health` e `/actuator/health/webhooks`.
+
+**Metricas Monitoradas**:
+- `webhook_received.pending` - Webhooks recebidos aguardando processamento
+- `webhook_delivery.pending` - Deliveries aguardando envio
+- `webhook_delivery.failed` - Deliveries falhadas aguardando retry
+- `webhook_delivery.exhausted` - Deliveries esgotadas (DLQ)
+
+**Thresholds**:
+```
+Status UP:     backlog total < 500
+Status WARNING: backlog total >= 500 e < 1000
+Status DOWN:    backlog total >= 1000
+```
+
+**Response Example**:
+```json
+{
+  "status": "UP",
+  "components": {
+    "webhooks": {
+      "status": "UP",
+      "details": {
+        "receivedPending": 120,
+        "deliveryPending": 45,
+        "deliveryFailed": 10,
+        "deliveryExhausted": 2,
+        "totalBacklog": 175,
+        "thresholds": {
+          "warning": 500,
+          "critical": 1000
+        }
+      }
+    }
+  }
+}
+```
+
+**Configuracao**:
+```properties
+# Habilitar endpoint (ja vem habilitado em actuator)
+management.endpoint.health.show-details=always
+management.health.webhooks.enabled=true
+
+# Thresholds customizados (opcional)
+portalweb.webhooks.health.warning-threshold=500
+portalweb.webhooks.health.critical-threshold=1000
+```
+
+**Uso Operacional**:
+- Monitoramento: integrar com Prometheus/Grafana via `/actuator/prometheus`
+- Alertas: configurar alertas se `status != UP`
+- Load balancer: usar como readiness probe
+
 ### Recomendacoes
 
-**Metricas (Micrometer)**:
-- Counter: `webhooks.received{source}`
-- Counter: `webhooks.sent{status}`
-- Timer: `webhooks.processing.duration`
-- Gauge: `webhooks.pending.count`
-
-**Health Check**:
-- Verificar backlog de PENDING
-- Alertar se > 1000 webhooks pendentes
-
-**Distributed Tracing**:
+**Distributed Tracing** (TODO):
 - Adicionar trace IDs nos logs
 - Integrar com Sleuth/Zipkin
 
@@ -747,28 +985,71 @@ Marca webhook como PENDING, limpando erro. Worker reprocessara na proxima execuc
 
 ---
 
+## Features Implementadas
+
+✅ Recepcao de webhooks com HMAC-SHA256
+✅ Rate limiting (60 req/min por IP+source)
+✅ Validacao de payload size (1 MB)
+✅ Deteccao de duplicatas (source + externalId)
+✅ Processamento assincrono com worker
+✅ Handlers para Stripe e Asaas
+✅ Arquitetura event-driven
+✅ Envio de webhooks (outgoing)
+✅ Retry com backoff exponencial
+✅ Dead Letter Queue (DLQ)
+✅ Auditoria de falhas HMAC
+✅ Admin APIs completas
+✅ Metricas com Micrometer
+✅ Multi-tenancy
+✅ Rate limiting com Redis (Strategy Pattern)
+✅ Health check de backlog (Actuator)
+
 ## Limitacoes Conhecidas
 
-1. **Payload Size**: Sem limite explicito (usa LONGTEXT). Recomendado adicionar validacao de 1-5 MB.
-
-2. **Rate Limit Storage**: In-memory (perde ao reiniciar). Para producao distribuida, considerar Redis.
-
-3. **Dead Letter Queue**: Webhooks EXHAUSTED ficam no banco. Considerar movimentacao para tabela de DLQ.
-
-4. **Metrics**: Sem metricas exportadas (Micrometer). Adicionar para monitoramento.
+1. **Distributed Tracing**: Sem trace IDs. Considerar integracao com Sleuth/Zipkin para rastreamento distribuido.
 
 ---
 
-## Referencias Tecnicas
+## Referencias Tecnicas e Decisoes Arquiteturais
 
-- **Java HttpClient**: https://docs.oracle.com/en/java/javase/11/docs/api/java.net.http/java/net/http/HttpClient.html
-- **HMAC-SHA256**: https://datatracker.ietf.org/doc/html/rfc2104
-- **Webhook Best Practices**: https://webhooks.fyi/best-practices/
-- **Exponential Backoff**: https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/
-- **Spring Events**: https://docs.spring.io/spring-framework/reference/core/beans/context-introduction.html
-- **Spring Modulith**: https://docs.spring.io/spring-modulith/reference/
+Abaixo, as referencias que fundamentaram as escolhas tecnicas deste modulo:
+
+- **Java HttpClient** (Java 11+)
+  - [Documentation](https://docs.oracle.com/en/java/javase/11/docs/api/java.net.http/java/net/http/HttpClient.html)
+  - **Aplicacao:** Base do `WebhookSenderService`.
+  - **Motivo:** Utilizacao de cliente nativo e assincrono para alta performance de I/O, eliminando a necessidade de dependencias externas pesadas (como Apache HttpClient ou OkHttp) para esta funcao.
+
+- **HMAC-SHA256 for Webhook Security**
+  - [RFC 2104 / Standard](https://datatracker.ietf.org/doc/html/rfc2104)
+  - **Aplicacao:** Classes `IncomingWebhookHmacValidator` e `WebhookSenderService`.
+  - **Motivo:** Garantia de integridade e autenticidade. Implementado com comparacao de tempo constante (*constant-time comparison*) para mitigar ataques de *timing*.
+
+- **Webhook Best Practices**
+  - [Webhooks.fyi](https://webhooks.fyi/best-practices/)
+  - **Aplicacao:** Arquitetura geral do modulo.
+  - **Motivo:** Adocao de padroes de mercado: resposta imediata (202 Accepted), processamento assincrono (Worker), idempotencia (`source` + `externalId`) e Dead Letter Queue (DLQ).
+
+- **Exponential Backoff and Jitter**
+  - [AWS Architecture Blog](https://aws.amazon.com/blogs/architecture/exponential-backoff-and-jitter/)
+  - **Aplicacao:** Logica de retentativa no `WebhookSenderService`.
+  - **Motivo:** Evita o "efeito manada" e sobrecarga no servidor do cliente em caso de indisponibilidade, escalonando o tempo de espera progressivamente (30s, 1m, 2m... 12h).
+
+- **Spring Events**
+  - [Spring Documentation](https://docs.spring.io/spring-framework/reference/core/beans/context-introduction.html)
+  - **Aplicacao:** `IncomingStripeWebhookEvent` e `IncomingAsaasWebhookEvent`.
+  - **Motivo:** Desacoplamento total entre o recebimento do webhook e a regra de negocio. O modulo apenas publica o evento; outros modulos (Financeiro, Vendas) assinam e processam.
+
+- **Spring Modulith**
+  - [Reference Documentation](https://docs.spring.io/spring-modulith/reference/)
+  - **Aplicacao:** Estrutura do pacote `com.auditoria.portalweb.modules.webhooks`.
+  - **Motivo:** Garante fronteiras arquiteturais estritas, impedindo que classes internas do modulo sejam acessadas indevidamente por outras partes do sistema.
+
+- **Micrometer Metrics**
+  - [Micrometer Docs](https://micrometer.io/docs)
+  - **Aplicacao:** `WebhookMetrics` e `WebhookMetricsUpdater`.
+  - **Motivo:** Observabilidade em tempo real. Permite monitorar taxas de erro, falhas de HMAC e tamanho das filas de processamento sem impactar a performance.
 
 ---
 
-**Autor**: Equipe Backend Portal Auditoria
+**Autor**: Samuel Sereja Silva
 **Versao**: 1.0.0 (Producao)
