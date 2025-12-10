@@ -69,23 +69,6 @@ Gestão de isolamento de dados e segurança.
 * Docker & Docker Compose (MariaDB + Redis)
 * Maven
 
-### Passo a Passo
-
-1. **Clone o repositório:**
-   ```bash
-   git clone [https://github.com/samuelserejasilva/portal-backend-architecture-saas-multitenant.git](https://github.com/samuelserejasilva/portal-backend-architecture-saas-multitenant.git)
-Suba a infraestrutura:
-
-Bash
-
-docker-compose up -d
-Configure as Variáveis de Ambiente (.env): Configure as chaves de API dos Marketplaces e Banco de Dados.
-
-Execute:
-
-Bash
-
-./mvnw spring-boot:run
 Autor: Samuel Sereja Silva
 👤 Autor
 Samuel Sereja Silva
