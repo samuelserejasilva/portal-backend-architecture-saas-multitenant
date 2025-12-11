@@ -470,6 +470,16 @@ Menos ruído, mesma funcionalidade, API moderna.
 - **2025-12-10** – Criação do `GUIA_DE_DESENVOLVIMENTO` unificado:
   - Consolidação das boas práticas de módulos, multi-tenant, segurança e compatibilidade de código.
   - Inclusão de seções “O que não fazer” (Beans antigos, JJWT legacy, Specifications confusas, Streams antigos).
+  - 
+  - **2025-12-11 (parte 2)** – Centralização de papéis/status e hardening extra:
+  - Criação dos enums `GlobalRole`, `TenantRole` e `MembershipStatus` em `shared.security`,
+    substituindo o uso direto de strings em serviços e filtros.
+  - Ajuste de `AuthService`, `TenantAccessFilter`, `UsuarioService`, `UserPublicServiceImpl`
+    e `TenantMembershipService` para usar os enums e padronizar definição de papel/status.
+  - Extensão dos guards multi-tenant para o fluxo de webhooks recebidos
+    (`WebhookAdminReceivedController` + service/repository com filtros por `empresa_id`).
+  - Execução da suíte de testes (`./mvnw test`) confirmando compatibilidade
+    após a migração para enums e reforço de tenant.
 
 ---
 
