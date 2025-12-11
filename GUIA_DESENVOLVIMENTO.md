@@ -17,7 +17,6 @@
 #### **Dependências entre Módulos**
 
 ---
-
 ## 1. Visão geral da arquitetura
 
 - **Stack principal**
@@ -341,10 +340,12 @@ public CorsConfigurationSource corsConfigurationSource() {
 #### 6.4.3. JPA Specifications
 
 **Evitar:**
+
 - Uso abusivo de `Specification.where(...)` encadeado com `and`/`or` de forma confusa
 - Montar critérios “na mão” em cada repo
 
 **Preferir:**
+
 - Métodos helpers claros, por exemplo:
 
 ```java
@@ -383,6 +384,14 @@ list.stream().map(...).toList();
 ```
 
 Menos ruído, mesma funcionalidade, API moderna.
+
+#### 6.4.5. Higiene de código e documentação
+
+- Comentários: evite redundantes/óbvios; documente apenas contexto ou decisão.
+- Código comentado não fica no repositório (use o histórico do git).
+- TODOs sempre com contexto, dono e prazo; TODO vazio vira dívida invisível.
+- Configuração de testes: inclua secrets válidos (ex.: `app.auth.jwt.secret` ≥ 32 chars) e demais
+  propriedades obrigatórias para evitar falsos positivos.
 
 ---
 
@@ -428,6 +437,7 @@ Menos ruído, mesma funcionalidade, API moderna.
 - [ ] Não foi criado endpoint multi-tenant sem validação de tenant.
 - [ ] Não foi adicionada rota pública sem ser intencional (ver `TenantAccessFilter`).
 - [ ] Mudanças de banco foram refletidas nos scripts/documentação.
+- [ ] Testes de integração configuram secrets obrigatórios (JWT, etc.) com valores válidos.
 
 ---
 
@@ -467,11 +477,13 @@ Menos ruído, mesma funcionalidade, API moderna.
   - Revisão completa dos controllers multi-tenant para parar de confiar em `empresaId` vindo do cliente.
   - Ajustes em services/repositories (`findByIdAndEmpresaId`, `deleteByIdAndEmpresaId`, etc.) para reforçar o isolamento.
   - Redução de rotas públicas em `TenantAccessFilter` (remoção de wildcards amplos como `/api/v1/empresas/**` e `/api/v1/pessoas/**`).
+- **2025-12-11** – Consolidação do conteúdo dos guias `PARTE_1` e `PARTE_2` neste arquivo; os
+  antigos ficam como referência histórica apenas.
 - **2025-12-10** – Criação do `GUIA_DE_DESENVOLVIMENTO` unificado:
   - Consolidação das boas práticas de módulos, multi-tenant, segurança e compatibilidade de código.
   - Inclusão de seções “O que não fazer” (Beans antigos, JJWT legacy, Specifications confusas, Streams antigos).
-  - 
-  - **2025-12-11 (parte 2)** – Centralização de papéis/status e hardening extra:
+
+- **2025-12-11 (parte 2)** – Centralização de papéis/status e hardening extra:
   - Criação dos enums `GlobalRole`, `TenantRole` e `MembershipStatus` em `shared.security`,
     substituindo o uso direto de strings em serviços e filtros.
   - Ajuste de `AuthService`, `TenantAccessFilter`, `UsuarioService`, `UserPublicServiceImpl`
