@@ -5,6 +5,8 @@
 
 > 📖 **Sobre este documento:**
 > Este é o guia completo de desenvolvimento do projeto, consolidando boas práticas, padrões arquiteturais, convenções de código e histórico de alterações técnicas.
+>  Documento para orientar o desenvolvimento do backend Java (Spring Boot / Spring Modulith / Multi-tenant).  
+> Foco: **organização de módulos, segurança, multi-tenancy, banco de dados, compatibilidade e boas práticas de código.**
 
 ---
 
@@ -12,1346 +14,464 @@
 
 ### 🚫 **O QUE NÃO FAZER**
 
-#### **1. Dependências entre Módulos**
-
-```java
-// ❌ ERRADO - Dependência circular ou invertida
-@ApplicationModule(allowedDependencies = {"content"})  // Mídia NÃO deve depender de Content
-package com.auditoria.portalweb.modules.midia;
-
-// ❌ ERRADO - Acessar repositório de outro módulo diretamente
-@Service
-class EmpresaService {
-    @Autowired
-    private MediaRepository mediaRepository;  // VIOLA fronteira modular!
-}
-
-// ❌ ERRADO - Nome incompleto de módulo
-@ApplicationModule(allowedDependencies = {"midia::domain"})  // Falta o prefixo "modules."
-```
-
-#### **2. Spring Beans - Tipos de Retorno**
-
-```java
-// ❌ ERRADO - Retornar interface em vez de classe concreta
-@Bean
-public PasswordEncoder passwordEncoder() {  // ⚠️ Warning: Ensure concrete bean type
-    return new BCryptPasswordEncoder();
-}
-
-@Bean
-public SecurityFilterChain authFilterChain(HttpSecurity http) {  // ⚠️ Warning
-    return http.build();
-}
-
-@Bean
-public CorsConfigurationSource corsConfigurationSource() {  // ⚠️ Warning
-    return source;
-}
-```
-
-#### **3. APIs Deprecadas**
-
-```java
-// ❌ ERRADO - JJWT API antiga (deprecada desde 0.12.x)
-import io.jsonwebtoken.SignatureAlgorithm;  // Deprecated!
-
-return Jwts.builder()
-    .signWith(key, SignatureAlgorithm.HS256);  // Método deprecado
-
-// ❌ ERRADO - Spring Data JPA API antiga (deprecada desde 3.5.0)
-Specification<AuditEvent> spec = Specification.where(pathSpec)  // Deprecated!
-    .and(emailSpec)
-    .and(statusSpec);
-
-// ❌ ERRADO - Java Stream API antiga
-.collect(Collectors.toList())  // Verboso, use .toList() em Java 16+
-```
-
-#### **4. Configuração de Testes**
-
-```java
-// ❌ ERRADO - Falta configuração JWT nos testes
-@SpringBootTest
-@TestPropertySource(properties = {
-    "spring.datasource.url=jdbc:h2:mem:testdb"
-    // FALTANDO: app.auth.jwt.secret, etc. - vai falhar!
-})
-
-// ❌ ERRADO - JWT secret muito curto
-"app.auth.jwt.secret=secret123"  // Precisa mínimo 32 caracteres para HS256!
-```
-
-#### **5. Comentários e Documentação**
-
-```java
-// ❌ ERRADO - Comentários óbvios ou redundantes
-// Retorna uma lista de empresas
-public List<Empresa> listarEmpresas() { ... }  // Comentário inútil
-
-// ❌ ERRADO - Código comentado (usar controle de versão)
-// @Autowired
-// private OldService oldService;
-
-// ❌ ERRADO - TODOs sem contexto
-// TODO: fix this  // O que precisa ser corrigido?
-```
+#### **Dependências entre Módulos**
 
 ---
 
-### ✅ **O QUE FAZER - PADRÕES CORRETOS**
+## 1. Visão geral da arquitetura
 
-#### **1. Configuração de Módulos Spring Modulith**
+- **Stack principal**
+  - Java 21+
+  - Spring Boot 3.x (API REST, Security, Validation)
+  - Spring Modulith (organização em módulos)
+  - Hibernate / JPA
+  - MariaDB (produção) / H2 (testes)
+  - JWT (access/refresh tokens)
+- **Modelo multi-tenant**
+  - Shared Database / Shared Schema
+  - Discriminador lógico `empresa_id` em todas as tabelas multi-tenant
+  - Isolamento garantido na camada de aplicação:
+    - JWT com `tenantId` + `role`
+    - `AuthenticatedUser` no contexto de segurança
+    - `TenantAccessFilter` validando vínculo `usuario_empresa`
+    - Services/Repositories **sempre** filtrando por `empresa_id`
 
-```java
-// ✅ CORRETO - Módulo autossuficiente (infraestrutura)
-@ApplicationModule
-package com.auditoria.portalweb.modules.midia;
+---
 
-// ✅ CORRETO - Dependências explícitas e unidirecionais
-@ApplicationModule(allowedDependencies = {
-    "shared",                    // Módulo compartilhado
-    "shared::mapper",            // Named interface
-    "shared::dto",               // Named interface
-    "modules.midia::domain"      // Nome COMPLETO do módulo
-})
-package com.auditoria.portalweb.modules.corporate;
+## 2. Padrões de módulos (Spring Modulith)
 
-// ✅ CORRETO - Expor interface pública do módulo
-@NamedInterface("domain")
-package com.auditoria.portalweb.modules.midia.domain;
+Este projeto é organizado em módulos sob `modules.*`, usando Spring Modulith.
 
-@NamedInterface("api")
-package com.auditoria.portalweb.modules.corporate.api;
+### 2.1. Estrutura mínima de um módulo
 
-@NamedInterface("spi")  // Service Provider Interface
-package com.auditoria.portalweb.modules.corporate.spi;
-```
+Todo novo módulo deve seguir a convenção:
 
-#### **2. Spring Beans - Tipos Concretos**
+- Pacote raiz: `modules.<nome>`  
+  Exemplos: `modules.corporate`, `modules.content`, `modules.webhooks`.
 
-```java
-// ✅ CORRETO - Retornar classe concreta (AOT/Native compatibility)
-@Configuration
-public class UsersConfig {
-    @Bean
-    public BCryptPasswordEncoder passwordEncoder() {  // ✅ Tipo concreto
-        return new BCryptPasswordEncoder();
-    }
-}
+- Subpacotes recomendados:
+  - `api` → controllers REST, DTOs expostos
+  - `application` → services de orquestração / casos de uso
+  - `domain` → entidades, agregados, regras de negócio
+  - `spi` → interfaces/DTOs exportadas para outros módulos
 
-@Configuration
-public class AuthSecurityConfig {
-    @Bean
-    DefaultSecurityFilterChain authFilterChain(HttpSecurity http) throws Exception {  // ✅ Tipo concreto
-        http.cors(c -> {})
-            .csrf(csrf -> csrf.disable())
-            .sessionManagement(sm -> sm.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
-            .authorizeHttpRequests(auth ->
-                auth.requestMatchers(PUBLIC_URLS).permitAll()
-                    .requestMatchers("/api/admin/**").hasRole("ADMIN")
-                    .anyRequest().authenticated())
-            .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class);
-        return http.build();  // ✅ Retorna DefaultSecurityFilterChain
-    }
-}
+### 2.2. O que TODO novo módulo deve ter
 
-@Configuration
-public class CorsConfig {
-    @Bean
-    public UrlBasedCorsConfigurationSource corsConfigurationSource() {  // ✅ Tipo concreto
-        CorsConfiguration config = new CorsConfiguration();
-        // ... configuração
-        UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
-        source.registerCorsConfiguration("/**", config);
-        return source;
-    }
-}
-```
+- [ ] Pacote próprio dentro de `modules` (`modules.<nome>`).
+- [ ] `package-info.java` com as regras de dependência do Modulith.
+- [ ] Pelo menos um `service` em `application` para encapsular regras de orquestração.
+- [ ] Entidades e lógica de domínio em `domain` (não em controllers).
+- [ ] Interfaces/DTOs para consumo externo em `spi` ou `api` (evitar expor entidades diretamente).
+- [ ] Documento `docs/Modulos/IMPLEMENTACAO_MODULO_<NOME>.md` com:
+  - Responsabilidade do módulo
+  - Principais classes
+  - Dependências com outros módulos
+  - Decisões importantes / restrições
 
-**Por quê tipos concretos?**
+### 2.3. O que NÃO deve ser feito em um módulo
 
-- ✅ Compatibilidade com Spring AOT (Ahead-of-Time compilation)
-- ✅ Compatibilidade com GraalVM Native Image
-- ✅ Melhor inferência de tipos pelo compilador
-- ✅ Mais eficiente em tempo de execução
+- ❌ Acessar diretamente:
+  - Entidades JPA de outro módulo
+  - Repositories de outro módulo
+  - Services concretos de outro módulo  
+  → Use interfaces em `spi` ou chamadas via `api` (DTOs) quando necessário.
+- ❌ Criar dependência circular entre módulos:
+  - Se `modules.content` depende de `modules.corporate`, então `modules.corporate` não pode depender de `modules.content`.
+- ❌ Usar `@ComponentScan` ou configurações que “estouram” o boundary definido no Modulith.
+- ❌ Ignorar falhas de testes de arquitetura (Modulith / ArchUnit):
+  - Se quebrou, é porque alguma fronteira foi violada.
 
-#### **3. APIs Modernas - JJWT 0.12.x**
+### 2.4. Fluxo recomendado para criar um novo módulo
 
-```java
-// ✅ CORRETO - JJWT API moderna (0.12.x)
-import io.jsonwebtoken.Jwts;
-import io.jsonwebtoken.security.Keys;
-import javax.crypto.SecretKey;
+1. Criar o pacote `modules.<nome>` com subpacotes `api/application/domain/spi`.
+2. Definir a responsabilidade do módulo e rascunhar `IMPLEMENTACAO_MODULO_<NOME>.md`.
+3. Expor apenas o estritamente necessário via `spi`/`api`.
+4. Declarar dependências no `package-info.java`.
+5. Rodar `./mvnw test` (incluindo testes Modulith/ArchUnit).
+6. Só então criar controllers REST e endpoints públicos.
 
-public class JwtTokenProvider {
-    private final SecretKey key;
+---
 
-    public JwtTokenProvider(@Value("${app.auth.jwt.secret}") String secret) {
-        byte[] keyBytes = secret.getBytes(StandardCharsets.UTF_8);
-        this.key = Keys.hmacShaKeyFor(keyBytes);  // ✅ Gera SecretKey
-    }
+## 3. Multi-tenancy e segurança de dados
 
-    public String newAccessToken(Long userId, String email, String role) {
-        Instant now = Instant.now();
-        return Jwts.builder()
-            .issuer(issuer)
-            .subject(email)
-            .claim("uid", userId)
-            .claim("role", role)
-            .issuedAt(Date.from(now))
-            .expiration(Date.from(now.plusSeconds(accessTtlSec)))
-            .signWith(key)  // ✅ Algoritmo inferido automaticamente do tipo SecretKey
-            .compact();
-    }
-}
-```
+O backend é multi-tenant por aplicação. Alguns princípios são obrigatórios.
 
-**Por quê?**
+### 3.1. Modelo de dados
 
-- ✅ `signWith(key)` infere automaticamente o algoritmo (HS256, HS384, HS512)
-- ✅ API type-safe e moderna
-- ✅ Sem enums deprecados
+- Tabelas **multi-tenant** têm:
+  - coluna `empresa_id` (NOT NULL)
+  - FK → `empresas(id)`
+  - índices por `empresa_id` (ex.: `idx_xxx_empresa`)
+- `usuario`:
+  - Tabela de identidade global (sem `empresa_id`).
+  - Campos: `id`, `email`, `senha_hash`, `role` (global), `ativo`, timestamps.
+- `usuario_empresa`:
+  - Tabela de vínculo N:N entre `usuario` e `empresas`.
+  - Campos principais:
+    - `usuario_id`
+    - `empresa_id`
+    - `role` (contextual: `COMPANY_ADMIN`, `USER`, `AUDITOR`…)
+    - `status` (`PENDING`, `ACTIVE`, `REVOKED`)
+- `empresas`:
+  - Informações da empresa (tenant)
+  - Flag `publica_para_convite` para controles de busca pública.
 
-#### **4. APIs Modernas - Spring Data JPA 3.5+**
+### 3.2. Regras de OURO – o que SEMPRE fazer
 
-```java
-// ✅ CORRETO - Specification.allOf() / anyOf()
-import org.springframework.data.jpa.domain.Specification;
+- ✅ Em **TODO endpoint multi-tenant**, obter o tenant a partir do usuário autenticado:
 
-Specification<AuditEvent> spec = Specification.allOf(  // ✅ API moderna
-    AuditSpecs.pathLike(path),
-    AuditSpecs.actorEmailLike(actorEmail),
-    AuditSpecs.statusEq(status),
-    AuditSpecs.createdBetween(from, to)
-);
+  ```java
+  @GetMapping
+  public List<AlgoDTO> listar(
+      @AuthenticationPrincipal(expression = "tenantId") Long tenantId,
+      @AuthenticationPrincipal(expression = "role") String role
+  ) { ... }
+  ```
 
-Page<AuditEvent> page = repository.findAll(spec, pageable);
-```
+- ✅ Para **não-super_admin**, o `empresaId` efetivo deve SEMPRE vir do contexto (`tenantId`), nunca do cliente.
+- ✅ Services/Repositories multi-tenant devem sempre usar métodos com `empresaId`, por exemplo:
+  - `findByIdAndEmpresaId(id, empresaId)`
+  - `deleteByIdAndEmpresaId(id, empresaId)`
+  - `findAllByEmpresaId(empresaId)`
+- ✅ `TenantAccessFilter` deve sempre:
+  - Validar que o JWT tem `tenantId` (exceto super_admin em rotas globais)
+  - Verificar se existe vínculo `usuario_empresa` com `status = ACTIVE` para `(usuario_id, empresa_id)`.
+- ✅ Diferenciar papéis:
+  - Global (`usuario.role`): ex. `super_admin`, `user`
+  - Contextual (`usuario_empresa.role`): ex. `COMPANY_ADMIN`, `USER`, `AUDITOR`
+  - `AuthenticatedUser.role`: papel efetivo no **tenant atual** (ou global, se SUPER_ADMIN).
 
-**Por quê?**
+### 3.3. O que NUNCA fazer (anti-padrões proibidos)
 
-- ✅ Mais explícito: `allOf()` = AND, `anyOf()` = OR
-- ✅ `.where()` está deprecado desde Spring Data JPA 3.5.0
-- ✅ Melhor legibilidade do código
+- ❌ Nunca confiar em `empresaId` enviado pelo cliente em:
+  - `@RequestParam Integer empresaId`
+  - `@PathVariable Integer empresaId`
+  - `dto.getEmpresaId()`
+- ❌ Nunca usar `findById(id)` / `deleteById(id)` em entidades multi-tenant sem incluir `empresaId`.
+- ❌ Nunca expor `/api/v1/empresas/**` ou `/api/v1/pessoas/**` inteiras como públicas.
+- ❌ Nunca gerar JWT ignorando `tenantId` ou `role` contextual.
 
-#### **5. Java Moderno - Streams**
+### 3.4. Padrão recomendado para resolver empresaId no controller
 
-```java
-// ✅ CORRETO - Java 16+ Stream.toList()
-List<String> origins = Arrays.stream(allowedOrigins.split(","))
-    .map(String::trim)
-    .filter(s -> !s.isEmpty())
-    .toList();  // ✅ Conciso e moderno
-
-// ❌ EVITE (verboso)
-.collect(Collectors.toList())  // Ainda funciona, mas verboso
-```
-
-#### **6. Relacionamentos Cross-Module (EntityManager)**
+Use sempre um padrão claro para resolver o `empresaId` efetivo:
 
 ```java
-// ✅ CORRETO - Usar EntityManager.getReference() para entidades de outros módulos
-@Service
-public class EmpresaServiceImpl implements EmpresaService {
-    @PersistenceContext
-    private EntityManager em;
+Integer resolveEmpresaId(String role, Long tenantId, Integer empresaIdFromRequest) {
+    boolean superAdmin = "SUPER_ADMIN".equalsIgnoreCase(role) || "super_admin".equalsIgnoreCase(role);
 
-    @Transactional
-    public EmpresaDTO save(EmpresaSaveDTO dto) {
-        Empresa empresa = new Empresa();
-        // ... preencher campos
-
-        if (dto.logoMediaId() != null) {
-            // ✅ Cria proxy JPA sem carregar entidade do outro módulo
-            Media logoMedia = em.getReference(Media.class, dto.logoMediaId());
-            empresa.setLogoMedia(logoMedia);
+    if (!superAdmin) {
+        if (tenantId == null) {
+            throw new AccessDeniedException("Tenant não definido para o usuário");
         }
-
-        return mapper.toDto(repository.save(empresa));
+        return tenantId.intValue(); // força tenant do contexto
     }
+
+    // SUPER_ADMIN:
+    // - se empresaIdFromRequest == null, pode listar todos (se fizer sentido)
+    // - se != null, filtra pelo tenant informado
+    return empresaIdFromRequest;
 }
 ```
 
-**Por quê?**
-
-- ✅ Respeita fronteiras modulares (não precisa do MediaRepository)
-- ✅ Performance: não carrega entidade desnecessariamente
-- ✅ JPA cria proxy lazy que só carrega se acessado
-
-#### **7. Configuração de Testes**
-
-```java
-// ✅ CORRETO - TestPropertySource completo
-@SpringBootTest(classes = {PortalwebApplication.class, TestConfig.class})
-@TestPropertySource(properties = {
-    // H2 Database
-    "spring.datasource.url=jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE",
-    "spring.datasource.username=sa",
-    "spring.datasource.password=",
-    "spring.datasource.driver-class-name=org.h2.Driver",
-    "spring.jpa.hibernate.ddl-auto=create-drop",
-    "spring.jpa.properties.hibernate.dialect=org.hibernate.dialect.H2Dialect",
-
-    // JWT Configuration (MÍNIMO 32 caracteres para HS256!)
-    "app.auth.jwt.secret=TEST_SECRET_KEY_FOR_TESTING_PURPOSES_MIN_32_CHARS_REQUIRED",
-    "app.auth.jwt.issuer=portalweb-test",
-    "app.auth.jwt.access-ttl-sec=900",
-    "app.auth.jwt.refresh-ttl-sec=1209600",
-
-    // Logging
-    "logging.level.org.hibernate=WARN",
-    "logging.level.org.springframework=WARN"
-})
-class PortalwebApplicationTests {
-    @Test
-    void contextLoads() {
-        // Context loading test
-    }
-}
-```
-
-**Regras JWT Secret:**
-
-- ✅ HS256: mínimo **32 caracteres** (256 bits)
-- ✅ HS384: mínimo **48 caracteres** (384 bits)
-- ✅ HS512: mínimo **64 caracteres** (512 bits)
-
-#### **8. Comentários Úteis**
-
-```java
-// ✅ CORRETO - Comentários que explicam "POR QUÊ", não "O QUÊ"
-
-/**
- * Usa EntityManager.getReference() em vez de MediaRepository.findById()
- * para respeitar fronteiras modulares do Spring Modulith.
- * O proxy JPA só carrega a entidade se necessário (lazy loading).
- */
-Media logoMedia = em.getReference(Media.class, dto.logoMediaId());
-
-/**
- * IMPORTANTE: O secret JWT deve ter no mínimo 32 caracteres para HS256.
- * Valores menores causam IllegalArgumentException em tempo de execução.
- */
-@Value("${app.auth.jwt.secret}")
-private String jwtSecret;
-
-/**
- * TODO(SAMUEL-2025-10-29): Implementar cache Redis para tokens revogados
- * Atualmente usando banco de dados, mas com alto volume pode gerar gargalo.
- * Estimativa: 2 dias de trabalho.
- */
-```
-
-#### **9. Anotações Spring Modulith**
-
-```java
-// ✅ Módulo simples (sem dependências)
-@ApplicationModule
-package com.auditoria.portalweb.modules.midia;
-
-// ✅ Módulo com dependências explícitas
-@ApplicationModule(allowedDependencies = {
-    "shared",
-    "shared::mapper",
-    "shared::dto",
-    "modules.midia::domain"
-})
-package com.auditoria.portalweb.modules.corporate;
-
-// ✅ Expor interface pública
-@NamedInterface("domain")  // Entidades JPA
-package com.auditoria.portalweb.modules.midia.domain;
-
-@NamedInterface("api")  // DTOs e Services públicos
-package com.auditoria.portalweb.modules.users.api;
-
-@NamedInterface("spi")  // Service Provider Interface
-package com.auditoria.portalweb.modules.corporate.spi;
-```
-
-#### **10. Convenções de Nome**
-
-```java
-// ✅ CORRETO - Sufixos consistentes
-@Service
-public class EmpresaServiceImpl implements EmpresaService { }  // Implementação
-
-@RestController
-@RequestMapping("/api/empresas")
-public class EmpresaController { }  // Controller sempre singular
-
-@RestController
-@RequestMapping("/api/admin/empresas")
-public class AdminEmpresaController { }  // Admin prefix para recursos administrativos
-
-@Repository
-public interface EmpresaRepository extends JpaRepository<Empresa, Long> { }  // Repository
-
-@Mapper(config = MapStructConfig.class)
-public interface EmpresaMapper { }  // Mapper
-
-public record EmpresaSaveDTO(...) { }  // DTO com sufixo descritivo (Save/Update/Response)
-```
+Controllers devem SEMPRE passar por essa regra (ou equivalente) antes de chamar services multi-tenant.
 
 ---
 
-### 🛡️ **VALIDAÇÃO E TESTES**
+## 4. Padrões de segurança (auth, JWT, rotas públicas)
 
-#### **Executar Testes de Arquitetura**
+### 4.1. JWT e contexto de usuário
 
-```bash
-# Validar fronteiras modulares
-mvn test -Dtest=ModulithArchitectureTests
+- Access Token:
+  - Deve conter: `uid`, `email`, `tenantId`, `role` (contextual).
+  - TTL curto (ex.: minutos).
+- Refresh Token:
+  - Contém pelo menos `uid`, `tenantId` (opcional dependendo da estratégia).
+  - TTL mais longo.
+- `JwtAuthenticationFilter` deve:
+  - Validar assinatura e expiração.
+  - Ler `uid`, `tenantId`, `role` do JWT.
+  - Carregar o usuário do banco:
+    - Confirmar se existe e está `ativo`.
+  - Para SUPER_ADMIN:
+    - reforçar o papel a partir do banco (não confiar só no token).
 
-# Executar todos os testes
-mvn clean test
+### 4.2. Rotas públicas x protegidas
 
-# Gerar documentação Modulith (automático nos testes)
-# Saída: target/spring-modulith-docs/
-mvn clean verify
-```
+- Rotas públicas típicas:
+  - `/v3/api-docs/**`, `/swagger-ui/**`
+  - `/actuator/health`, `/actuator/info`
+  - `/api/v1/auth/**` (login, refresh, register, etc.)
+  - Rotas específicas de conteúdo público (posts, serviços, layout/media) definidas no `TenantAccessFilter`.
 
-#### **Testes Obrigatórios**
+- Tudo que envolver:
+  - Dados de empresas
+  - Dados de pessoas/usuários
+  - Configurações (webhooks, integrações, etc.)  
+  → deve exigir autenticação + validação de tenant.
 
-1. **ModulithArchitectureTests** - Valida arquitetura modular
-2. **PortalwebApplicationTests** - Valida contexto Spring
-3. **Testes unitários** - Para cada service/controller
+### 4.3. Papéis e autorização
 
----
-
-## 📝 **CONVENÇÕES DE CÓDIGO E NOMENCLATURA**
-
-### 🏷️ **Nomenclatura Padrão**
-
-#### **Módulos e Pacotes**
-
-```java
-// ✅ CORRETO - Módulos sempre no plural
-com.auditoria.portalweb.modules.corporate
-com.auditoria.portalweb.modules.content
-com.auditoria.portalweb.modules.users
-
-// ✅ CORRETO - Entidades sempre no singular
-public class Empresa { }
-public class Post { }
-public class Usuario { }
-```
-
-#### **Classes de Serviço**
-
-```java
-// ✅ CORRETO - Interface + Implementação
-public interface EmpresaService { }
-
-@Service
-class EmpresaServiceImpl implements EmpresaService { }
-```
-
-#### **Controllers**
-
-```java
-// ✅ CORRETO - Sufixo Controller
-@RestController
-@RequestMapping("/api/empresas")
-public class EmpresaController { }
-
-@RestController
-@RequestMapping("/api/admin/empresas")
-public class AdminEmpresaController { }
-```
-
-#### **DTOs**
-
-```java
-// ✅ CORRETO - Sufixos descritivos
-public record EmpresaDTO(...) { }           // Read/Response
-public record EmpresaCreateDTO(...) { }     // Create
-public record EmpresaUpdateDTO(...) { }     // Update/Patch
-public record EmpresaFilterDTO(...) { }     // Filtros de busca
-```
-
-### 📦 **Estrutura de Pacotes por Módulo**
-
-```txt
-modules/{nome}/
-├── package-info.java          # @ApplicationModule
-├── domain/                    # Entidades JPA (PRIVADO)
-│   └── {Entity}.java
-├── repository/                # Spring Data JPA (PRIVADO)
-│   └── {Entity}Repository.java
-├── service/                   # Interfaces de serviço (PRIVADO)
-│   └── {Entity}Service.java
-├── internal/                  # Implementações (PACKAGE-PRIVATE)
-│   └── {Entity}ServiceImpl.java
-├── api/                       # API REST interna do módulo
-│   ├── dto/                   # DTOs para API REST
-│   │   └── {Entity}DTO.java
-│   └── mapper/                # MapStruct mappers
-│       └── {Entity}Mapper.java
-├── web/                       # Controllers REST
-│   └── {Entity}Controller.java
-├── spi/                       # ✅ INTERFACE PÚBLICA (outros módulos)
-│   ├── package-info.java      # @NamedInterface("spi")
-│   ├── {Module}Api.java       # Contratos públicos
-│   └── dto/                   # DTOs públicos
-│       ├── package-info.java  # @NamedInterface
-│       └── {Entity}PublicDTO.java
-└── domain/                    # ✅ EXPOSIÇÃO DE ENTIDADES (quando necessário)
-    └── package-info.java      # @NamedInterface("domain")
-```
-
-### 🎯 **Regras de Camadas**
-
-#### **1. Fluxo HTTP Obrigatório**
-
-```java
-// ✅ CORRETO
-Browser → Controller → Service → Repository → Database
-
-// ❌ ERRADO - Controller NÃO pode acessar Repository direto
-@RestController
-class EmpresaController {
-    @Autowired
-    private EmpresaRepository repository;  // ❌ PROIBIDO!
-}
-```
-
-#### **2. DTOs Obrigatórios em APIs REST**
-
-```java
-// ✅ CORRETO - Controller retorna DTO
-@GetMapping("/{id}")
-public ResponseEntity<EmpresaDTO> getById(@PathVariable Long id) {
-    return ResponseEntity.ok(empresaService.findById(id));
-}
-
-// ❌ ERRADO - NUNCA retornar Entity
-@GetMapping("/{id}")
-public ResponseEntity<Empresa> getById(@PathVariable Long id) {  // ❌ PROIBIDO!
-    return ResponseEntity.ok(empresaRepository.findById(id).orElseThrow());
-}
-```
-
-#### **3. MapStruct - Configuração Global**
-
-```java
-// ✅ CORRETO - Sempre usar MapStructConfig do shared
-@Mapper(config = MapStructConfig.class)
-public interface EmpresaMapper {
-    EmpresaDTO toDto(Empresa entity);
-    Empresa toEntity(EmpresaCreateDTO dto);
-
-    // Para updates parciais
-    void updateEntityFromDto(EmpresaUpdateDTO dto, @MappingTarget Empresa entity);
-}
-```
-
-**Por quê?**
-
-- `MapStructConfig` está em `shared/mapper`
-- Define `componentModel = "spring"` globalmente
-- Garante consistência em todos os mappers
-
-#### **4. Validação**
-
-```java
-// ✅ CORRETO - @Valid em DTOs de entrada
-@PostMapping
-public ResponseEntity<EmpresaDTO> create(@Valid @RequestBody EmpresaCreateDTO dto) {
-    return ResponseEntity
-        .status(HttpStatus.CREATED)
-        .body(empresaService.create(dto));
-}
-
-// ✅ CORRETO - Mensagens em messages.properties
-javax.validation.constraints.NotBlank.message=Campo obrigatório
-javax.validation.constraints.Email.message=Email inválido
-```
-
-#### **5. Exceções - Tratamento Global**
-
-```java
-// ✅ CORRETO - Lançar exceções de negócio
-@Service
-class EmpresaServiceImpl implements EmpresaService {
-    public EmpresaDTO findById(Long id) {
-        return repository.findById(id)
-            .map(mapper::toDto)
-            .orElseThrow(() -> new EntityNotFoundException("Empresa não encontrada: " + id));
-    }
-}
-
-// ✅ Tratamento global em GlobalExceptionHandler
-@RestControllerAdvice
-public class GlobalExceptionHandler {
-    @ExceptionHandler(EntityNotFoundException.class)
-    public ResponseEntity<ApiError> handleNotFound(EntityNotFoundException ex) {
-        ApiError error = new ApiError(
-            HttpStatus.NOT_FOUND.value(),
-            ex.getMessage(),
-            Instant.now()
-        );
-        return ResponseEntity.status(HttpStatus.NOT_FOUND).body(error);
-    }
-}
-```
-
-### ⚠️ **Null-Safety em Classes Spring**
-
-Quando implementar interfaces do Spring Framework (ex.: `WebMvcConfigurer`, `Converter`, `HandlerInterceptor`):
-
-```java
-// ✅ CORRETO - Aplicar política global de null-safety por pacote
-// package-info.java
-@org.springframework.lang.NonNullApi
-@org.springframework.lang.NonNullFields
-package com.auditoria.portalweb.config;
-```
-
-**Por quê?**
-
-- Evita warnings do tipo: "Missing non-null annotation"
-- Melhora análise estática de código
-- Compatível com Kotlin null-safety
-
-### 🚫 **Dependências entre Módulos**
-
-```java
-// ❌ ERRADO - Importar service/repository/domain de outro módulo
-import com.auditoria.portalweb.modules.midia.repository.MediaRepository;  // ❌
-import com.auditoria.portalweb.modules.corporate.service.EmpresaService;  // ❌
-import com.auditoria.portalweb.modules.content.domain.Post;               // ❌
-
-// ✅ CORRETO - Apenas via SPI ou domain (Named Interface)
-import com.auditoria.portalweb.modules.corporate.spi.EmpresaApi;          // ✅
-import com.auditoria.portalweb.modules.corporate.spi.dto.EmpresaSeoDTO;   // ✅
-import com.auditoria.portalweb.modules.midia.domain.Media;                // ✅ (se @NamedInterface)
-```
+- Papéis globais (`usuario.role`):
+  - `super_admin`, `user` (evitar misturar papel global com contextual).
+- Papéis contextuais (`usuario_empresa.role`):
+  - `COMPANY_ADMIN`, `USER`, `AUDITOR`, etc.
+- `AuthenticatedUser.role` é o papel efetivo no contexto atual:
+  - Usar esse valor em checks de autorização (`@PreAuthorize`, etc.).
 
 ---
 
-## 🏗️ **ARQUITETURA SPRING MODULITH**
+## 5. Padrões de banco de dados e migrações
 
-### 📐 **Princípios Arquiteturais**
+### 5.1. Convenções de nomenclatura
 
-1. **Isolamento Modular**: Cada módulo é autossuficiente com suas próprias regras de negócio
-2. **Comunicação via Contratos**: Módulos se comunicam apenas por interfaces públicas (`spi` ou `domain`)
-3. **Fronteiras Validadas**: Testes automatizados garantem que não há violações de acesso
-4. **Clean Architecture**: Separação clara entre camadas (web → service → repository)
+- Tabelas: `snake_case` (`usuario`, `usuario_empresa`, `webhook_delivery`).
+- Colunas: `snake_case` (`empresa_id`, `created_at`, `senha_hash`).
+- Constraints:
+  - FKs: `fk_<tabela>_<referencia>` (ex.: `fk_usuario_empresa_usuario`)
+  - UNIQUE: `uq_<tabela>_<campos>`
+  - Índices: `idx_<tabela>_<coluna>`
 
-### 🧩 **Anotações Spring Modulith**
+### 5.2. Multi-tenancy
 
-#### **1. Módulo Básico (sem dependências)**
+- Qualquer tabela que represente dado “por empresa” **deve ter**:
+  - Coluna `empresa_id` NOT NULL
+  - FK para `empresas(id)`
+- Consultas SEMPRE devem incluir `empresa_id` (exceto em cenários globais bem controlados, ex.: super_admin).
 
-```java
-// modules/midia/package-info.java
-@org.springframework.modulith.ApplicationModule
-package com.auditoria.portalweb.modules.midia;
-```
+### 5.3. Migrações
 
-#### **2. Módulo com Dependências**
-
-```java
-// modules/corporate/package-info.java
-@org.springframework.modulith.ApplicationModule(
-    allowedDependencies = {
-        "shared",                    // Módulo compartilhado
-        "shared::mapper",            // Named interface do shared
-        "shared::dto",               // Named interface do shared
-        "modules.midia::domain"      // Named interface do módulo mídia
-    }
-)
-package com.auditoria.portalweb.modules.corporate;
-```
-
-**Regras:**
-
-- Nome completo do módulo: `modules.{nome}::interface`
-- Spring Modulith deriva o nome do caminho do pacote
-- Use `::` para referenciar Named Interfaces
-
-#### **3. Expor Interface Pública (SPI)**
-
-```java
-// modules/corporate/spi/package-info.java
-@org.springframework.modulith.NamedInterface("spi")
-package com.auditoria.portalweb.modules.corporate.spi;
-
-// modules/corporate/spi/dto/package-info.java
-@org.springframework.modulith.NamedInterface
-package com.auditoria.portalweb.modules.corporate.spi.dto;
-```
-
-#### **4. Expor Entidades de Domínio**
-
-```java
-// modules/midia/domain/package-info.java
-@org.springframework.modulith.NamedInterface("domain")
-package com.auditoria.portalweb.modules.midia.domain;
-```
-
-**Quando usar:**
-
-- ✅ Para relacionamentos JPA cross-module (ex.: Empresa → Media)
-- ✅ Com `EntityManager.getReference()` para respeitar fronteiras
-- ❌ NÃO expor domain se houver alternativa via SPI/DTOs
-
-#### **5. Módulo Aberto (Shared)**
-
-```java
-// shared/package-info.java
-@org.springframework.modulith.ApplicationModule(
-    type = org.springframework.modulith.ApplicationModule.Type.OPEN
-)
-package com.auditoria.portalweb.shared;
-
-// shared/dto/package-info.java
-@org.springframework.modulith.NamedInterface
-package com.auditoria.portalweb.shared.dto;
-```
-
-**Tipo OPEN:**
-
-- Permite acesso de qualquer módulo
-- Use apenas para utilitários e contratos comuns
-- NUNCA coloque lógica de negócio em `shared`
-
-### 🔄 **Comunicação Entre Módulos**
-
-#### **Exemplo: Layout consumindo Corporate**
-
-```java
-// 1. Corporate expõe interface pública
-// modules/corporate/spi/EmpresaApi.java
-public interface EmpresaApi {
-    EmpresaSeoDTO obterSeoDaEmpresa();
-}
-
-// 2. Corporate implementa
-// modules/corporate/internal/EmpresaServiceImpl.java
-@Service
-class EmpresaServiceImpl implements EmpresaApi {
-    @Override
-    public EmpresaSeoDTO obterSeoDaEmpresa() {
-        // lógica privada usando repository e domain
-        Empresa empresa = repository.findPrincipal().orElseThrow();
-        return mapper.toSeoDto(empresa);
-    }
-}
-
-// 3. Layout declara dependência
-// modules/layout/package-info.java
-@ApplicationModule(
-    allowedDependencies = {"shared", "modules.corporate::spi"}
-)
-package com.auditoria.portalweb.modules.layout;
-
-// 4. Layout consome
-// modules/layout/service/LayoutServiceImpl.java
-@Service
-class LayoutServiceImpl {
-    private final EmpresaApi empresaApi;  // ✅ Injeção via interface pública
-
-    public HomePageDTO buildHomePage() {
-        EmpresaSeoDTO seo = empresaApi.obterSeoDaEmpresa();
-        // ... compor página
-    }
-}
-```
+- Migrações são feitas via scripts SQL versionados (sem Flyway/Liquibase).
+- Não criar/alterar tabelas diretamente no banco sem atualizar:
+  - `schema.sql`
+  - `data.sql`
+  - `DB_SCHEMA_ONLY.sql` (para documentação)
+- Toda mudança de schema deve ser registrada em:
+  - `DB_CONTROL.md`
+  - `DB_INDEX_MAP.md`
+  - `db_change_checklist.md` (se aplicável).
 
 ---
 
-## 🚀 **PASSO A PASSO: CRIAR NOVO MÓDULO**
+## 6. Padrões de controllers, services, repositories e compatibilidade de código
 
-### 📋 **Checklist de Criação**
+### 6.1. Controllers
 
-#### **1. Criar Estrutura de Pastas**
+- Devem ser finos:
+  - apenas validação básica, extração de contexto (`tenantId`, `role`), mapeamento de DTOs.
+- Não colocar regras de negócio complexas em controllers.
+- Em endpoints multi-tenant:
+  - Sempre usar `tenantId` do usuário autenticado.
+  - Ignorar/sobrescrever `empresaId` vindo do cliente (exceto super_admin).
 
-```bash
-mkdir -p src/main/java/com/auditoria/portalweb/modules/novomodulo/{domain,repository,service,internal,api/dto,api/mapper,web,spi/dto}
-```
+### 6.2. Services
 
-#### **2. Criar package-info.java Principal**
+- Cada caso de uso principal deve ter um service correspondente.
+- Services multi-tenant devem receber `empresaId` já resolvido pelo controller.
+- Não acessar diretamente requisição HTTP ou SecurityContext dentro dos services (passar o que precisa, ex.: `empresaId`, `usuarioId`).
 
-```java
-// modules/novomodulo/package-info.java
-@org.springframework.modulith.ApplicationModule(
-    allowedDependencies = {
-        "shared",
-        "shared::mapper",
-        "shared::dto"
-        // Adicionar outros módulos se necessário
-    }
-)
-package com.auditoria.portalweb.modules.novomodulo;
-```
+### 6.3. Repositories
 
-#### **3. Criar Entidade JPA**
+- Para entidades multi-tenant:
+  - Criar métodos específicos com `empresaId`:
+    - `findByIdAndEmpresaId`
+    - `deleteByIdAndEmpresaId`
+    - `findAllByEmpresaId`
+- Evitar uso de `findAll()` e `findById()` “nus” em entidades multi-tenant.
 
-```java
-// modules/novomodulo/domain/MinhaEntidade.java
-@Entity
-@Table(name = "minha_entidade")
-public class MinhaEntidade {
-    @Id
-    @GeneratedValue(strategy = GenerationType.IDENTITY)
-    private Long id;
+### 6.4. Convenções de código e compatibilidade (Beans, APIs modernas, etc.)
 
-    @Column(nullable = false, length = 100)
-    private String nome;
+Esta seção resume **o que não usar** e **o que usar** na stack atual (Spring Boot 3.x, Java 21, JJWT novo, etc.), baseada nas confusões que já aconteceram.
 
-    // getters, setters, equals, hashCode
-}
-```
+#### 6.4.1. Beans de segurança (Spring Security 6+)
 
-#### **4. Criar Repository**
+**Não usar mais:**
+
+- `WebSecurityConfigurerAdapter` (deprecated/removido)
+- Métodos antigos como:
+  - `http.authorizeRequests()`
+  - `http.csrf().disable()` encadeado no estilo antigo
+  - `authenticationManagerBean()`
+
+**Padrão correto:** usar Beans explícitos:
 
 ```java
-// modules/novomodulo/repository/MinhaEntidadeRepository.java
-public interface MinhaEntidadeRepository extends JpaRepository<MinhaEntidade, Long> {
-    Optional<MinhaEntidade> findByNome(String nome);
-}
-```
-
-#### **5. Criar DTOs**
-
-```java
-// modules/novomodulo/api/dto/MinhaEntidadeDTO.java
-public record MinhaEntidadeDTO(Long id, String nome) { }
-
-public record MinhaEntidadeCreateDTO(@NotBlank String nome) { }
-
-public record MinhaEntidadeUpdateDTO(@NotBlank String nome) { }
-```
-
-#### **6. Criar Mapper**
-
-```java
-// modules/novomodulo/api/mapper/MinhaEntidadeMapper.java
-@Mapper(config = MapStructConfig.class)
-public interface MinhaEntidadeMapper {
-    MinhaEntidadeDTO toDto(MinhaEntidade entity);
-    MinhaEntidade toEntity(MinhaEntidadeCreateDTO dto);
-    void updateEntity(MinhaEntidadeUpdateDTO dto, @MappingTarget MinhaEntidade entity);
-}
-```
-
-#### **7. Criar Service**
-
-```java
-// modules/novomodulo/service/MinhaEntidadeService.java
-public interface MinhaEntidadeService {
-    MinhaEntidadeDTO findById(Long id);
-    List<MinhaEntidadeDTO> findAll();
-    MinhaEntidadeDTO create(MinhaEntidadeCreateDTO dto);
-    MinhaEntidadeDTO update(Long id, MinhaEntidadeUpdateDTO dto);
-    void delete(Long id);
-}
-
-// modules/novomodulo/internal/MinhaEntidadeServiceImpl.java
-@Service
-class MinhaEntidadeServiceImpl implements MinhaEntidadeService {
-    private final MinhaEntidadeRepository repository;
-    private final MinhaEntidadeMapper mapper;
-
-    // Implementar métodos...
-}
-```
-
-#### **8. Criar Controller**
-
-```java
-// modules/novomodulo/web/MinhaEntidadeController.java
-@RestController
-@RequestMapping("/api/minhas-entidades")
-public class MinhaEntidadeController {
-    private final MinhaEntidadeService service;
-
-    @GetMapping
-    public ResponseEntity<List<MinhaEntidadeDTO>> findAll() {
-        return ResponseEntity.ok(service.findAll());
-    }
-
-    @GetMapping("/{id}")
-    public ResponseEntity<MinhaEntidadeDTO> findById(@PathVariable Long id) {
-        return ResponseEntity.ok(service.findById(id));
-    }
-
-    @PostMapping
-    public ResponseEntity<MinhaEntidadeDTO> create(@Valid @RequestBody MinhaEntidadeCreateDTO dto) {
-        return ResponseEntity
-            .status(HttpStatus.CREATED)
-            .body(service.create(dto));
-    }
-
-    @PutMapping("/{id}")
-    public ResponseEntity<MinhaEntidadeDTO> update(
-        @PathVariable Long id,
-        @Valid @RequestBody MinhaEntidadeUpdateDTO dto
-    ) {
-        return ResponseEntity.ok(service.update(id, dto));
-    }
-
-    @DeleteMapping("/{id}")
-    public ResponseEntity<Void> delete(@PathVariable Long id) {
-        service.delete(id);
-        return ResponseEntity.noContent().build();
-    }
-}
-```
-
-#### **9. (Opcional) Expor Interface Pública**
-
-Se outros módulos precisarem consumir este módulo:
-
-```java
-// modules/novomodulo/spi/package-info.java
-@org.springframework.modulith.NamedInterface("spi")
-package com.auditoria.portalweb.modules.novomodulo.spi;
-
-// modules/novomodulo/spi/NovoModuloApi.java
-public interface NovoModuloApi {
-    MinhaEntidadePublicDTO obterDados();
-}
-
-// modules/novomodulo/spi/dto/package-info.java
-@org.springframework.modulith.NamedInterface
-package com.auditoria.portalweb.modules.novomodulo.spi.dto;
-
-// modules/novomodulo/spi/dto/MinhaEntidadePublicDTO.java
-public record MinhaEntidadePublicDTO(Long id, String nome) { }
-```
-
-#### **10. Executar Testes de Arquitetura**
-
-```bash
-# Validar que o módulo respeita fronteiras
-mvn test -Dtest=ModulithArchitectureTests
-
-# Se passar, tudo certo! ✅
-```
-
-### ✅ **Checklist Final**
-
-- [ ] `package-info.java` criado no módulo raiz
-- [ ] Entidades JPA em `domain/`
-- [ ] Repository em `repository/`
-- [ ] Service + Impl em `service/` e `internal/`
-- [ ] DTOs em `api/dto/`
-- [ ] Mapper em `api/mapper/` usando `MapStructConfig`
-- [ ] Controller em `web/` retornando apenas DTOs
-- [ ] (Se necessário) SPI em `spi/` com `@NamedInterface`
-- [ ] Testes de arquitetura passando
-- [ ] Documentação do módulo em `/docs/Módulos/`
-
----
-
-## 🛠️ **STACK TECNOLÓGICA**
-
-### 📦 **Versões Principais**
-
-| Componente | Versão | Observações |
-|------------|--------|-------------|
-| **Java** | 21 LTS | Recursos modernos (records, pattern matching, etc.) |
-| **Spring Boot** | 3.5.7 | Framework principal |
-| **Spring Modulith** | 1.3.2 | Arquitetura modular validada |
-| **MariaDB** | 12.0.2+ | Collation: utf8mb4_uca1400_ai_ci |
-| **MapStruct** | 1.6.3 | Mapeamento DTO ↔ Entity |
-| **JJWT** | 0.12.6 | JWT moderno (sem SignatureAlgorithm) |
-| **Maven** | 3.8+ | Build via Maven Wrapper |
-
-### 🔧 **Build e Qualidade**
-
-- **Spotless** - Formatação de código automática
-- **Checkstyle** - Verificação de estilo (config/quality/checkstyle.xml)
-- **PMD** - Análise estática (config/quality/pmd-ruleset.xml)
-- **SpotBugs** - Detecção de bugs (config/quality/spotbugs-exclude.xml)
-- **JaCoCo** - Cobertura de testes
-
-### 🌐 **Perfis de Execução**
-
-| Profile | Porta | DDL Mode | Database | Uso |
-|---------|-------|----------|----------|-----|
-| **dev** | 8080 | `update` | MariaDB | Desenvolvimento local |
-| **test** | 8080 | `create-drop` | H2 (memória) | Testes automatizados |
-| **prod** | 8080 | `validate` | MariaDB | Produção |
-
-**Ativação:**
-
-```bash
-# Via variável de ambiente (RECOMENDADO)
-export SPRING_PROFILES_ACTIVE=dev
-mvn spring-boot:run
-
-# Via linha de comando
-mvn spring-boot:run -Dspring-boot.run.profiles=dev
-```
-
-### 🗄️ **Estratégia de Banco de Dados**
-
-**❌ NÃO utilizamos:**
-
-- Flyway
-- Liquibase
-- Migrations automáticas
-
-**✅ Utilizamos:**
-
-- **DEV**: Scripts SQL manuais idempotentes (`schema.sql`, `data.sql`)
-  - `spring.jpa.hibernate.ddl-auto=update` (aceitável apenas em DEV)
-- **PROD**: Scripts SQL revisados e controlados
-  - `spring.jpa.hibernate.ddl-auto=validate` (apenas validação)
-- **TEST**: H2 in-memory com modo MySQL
-  - `spring.jpa.hibernate.ddl-auto=create-drop`
-
----
-
-## 🎯 **HISTÓRICO DE ALTERAÇÕES**
-
-## 🎯 **29/10/2025 - Atualização Spring Boot 3.5.7 + Modernização de APIs**
-
-### ✅ **Implementado**
-
-#### **🔧 Correções e Modernizações**
-
-**1. Spring Boot - Atualização de Versão:**
-
-```xml
-<!-- pom.xml -->
-<parent>
-  <groupId>org.springframework.boot</groupId>
-  <artifactId>spring-boot-starter-parent</artifactId>
-  <version>3.5.7</version>  <!-- ✅ Atualizado de 3.5.6 -->
-</parent>
-```
-
-**2. Spring Beans - Tipos Concretos (AOT/Native Compatibility):**
-
-```java
-// ✅ UsersConfig.java - BCryptPasswordEncoder
 @Bean
-public BCryptPasswordEncoder passwordEncoder() {  // Antes: PasswordEncoder
+public PasswordEncoder passwordEncoder() {
     return new BCryptPasswordEncoder();
 }
 
-// ✅ AuthSecurityConfig.java - DefaultSecurityFilterChain
 @Bean
-DefaultSecurityFilterChain authFilterChain(HttpSecurity http) throws Exception {  // Antes: SecurityFilterChain
-    // ...
+public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    http
+        .csrf(csrf -> csrf.disable())
+        .authorizeHttpRequests(auth -> auth
+            .requestMatchers(PUBLIC_PATTERNS).permitAll()
+            .anyRequest().authenticated()
+        )
+        .oauth2ResourceServer(oauth2 -> oauth2.jwt());
     return http.build();
 }
 
-// ✅ CorsConfig.java - UrlBasedCorsConfigurationSource
 @Bean
-public UrlBasedCorsConfigurationSource corsConfigurationSource() {  // Antes: CorsConfigurationSource
-    // ...
+public CorsConfigurationSource corsConfigurationSource() {
+    CorsConfiguration config = new CorsConfiguration();
+    config.setAllowedOrigins(List.of("https://app.portalauditoria.com.br"));
+    config.setAllowedMethods(List.of("GET", "POST", "PUT", "DELETE", "OPTIONS"));
+    config.setAllowedHeaders(List.of("*"));
+    UrlBasedCorsConfigurationSource source = new UrlBasedCorsConfigurationSource();
+    source.registerCorsConfiguration("/**", config);
     return source;
 }
 ```
 
-**Motivo:** Compatibilidade com Spring AOT e GraalVM Native Image.
+#### 6.4.2. JWT – evitar API antiga do JJWT
 
-**3. JJWT - API Moderna (0.12.x):**
+**Não fazer (API antiga e confusa):**
+
+- Usar apenas o jar `jjwt` “tudo em um” (0.9.x)
+- Usar `SignatureAlgorithm.HS512` direto nos métodos estáticos antigos
+- Misturar parsing antigo com criação nova
+
+**Padrão correto:** (exemplo conceitual)
+
+- Usar a nova forma (separando módulos `jjwt-api`, `jjwt-impl`, `jjwt-jackson`)
+- Centralizar criação/parse de tokens em um `JwtTokenProvider` do projeto
+- Nunca espalhar lógica de criação/parsing em controllers
+
+#### 6.4.3. JPA Specifications
+
+**Evitar:**
+- Uso abusivo de `Specification.where(...)` encadeado com `and`/`or` de forma confusa
+- Montar critérios “na mão” em cada repo
+
+**Preferir:**
+- Métodos helpers claros, por exemplo:
 
 ```java
-// ✅ JwtTokenProvider.java
-// REMOVIDO: import io.jsonwebtoken.SignatureAlgorithm;
-
-public String newAccessToken(Long userId, String email, String role) {
-    return Jwts.builder()
-        // ...
-        .signWith(key)  // ✅ Algoritmo inferido automaticamente (antes: signWith(key, SignatureAlgorithm.HS256))
-        .compact();
+public class EmpresaSpecs {
+    public static Specification<Empresa> comNomeOuCnpj(String termo) {
+        return (root, query, cb) -> {
+            String like = "%" + termo.toLowerCase() + "%";
+            return cb.or(
+                cb.like(cb.lower(root.get("razaoSocial")), like),
+                cb.like(cb.lower(root.get("cnpj")), like)
+            );
+        };
+    }
 }
 ```
 
-**4. Spring Data JPA - API Moderna (3.5+):**
+- E usar em serviços:
 
 ```java
-// ✅ AdminAuditController.java
-Specification<AuditEvent> spec = Specification.allOf(  // ✅ Antes: Specification.where()
-    AuditSpecs.pathLike(path),
-    AuditSpecs.actorEmailLike(actorEmail),
-    AuditSpecs.statusEq(status),
-    AuditSpecs.createdBetween(from, to)
-);
+var spec = Specification.where(EmpresaSpecs.comNomeOuCnpj(filtro));
+repo.findAll(spec);
 ```
 
-**5. Java 16+ - Stream API Moderna:**
+#### 6.4.4. Streams e coleções (Java 21)
+
+**Evitar (ainda funciona, mas é desnecessário):**
 
 ```java
-// ✅ CorsConfig.java
-List<String> origins = Arrays.stream(allowedOrigins.split(","))
-    .map(String::trim)
-    .filter(s -> !s.isEmpty())
-    .toList();  // ✅ Antes: .collect(Collectors.toList())
+list.stream().map(...).collect(Collectors.toList());
 ```
 
-**6. Testes - Configuração JWT:**
+**Preferir:**
 
 ```java
-// ✅ PortalwebApplicationTests.java
-@TestPropertySource(properties = {
-    // H2 Database
-    "spring.datasource.url=jdbc:h2:mem:testdb;DB_CLOSE_DELAY=-1;DB_CLOSE_ON_EXIT=FALSE",
-    "spring.datasource.driver-class-name=org.h2.Driver",
-
-    // ✅ ADICIONADO: JWT Configuration (mínimo 32 caracteres para HS256)
-    "app.auth.jwt.secret=TEST_SECRET_KEY_FOR_TESTING_PURPOSES_MIN_32_CHARS_REQUIRED",
-    "app.auth.jwt.issuer=portalweb-test",
-    "app.auth.jwt.access-ttl-sec=900",
-    "app.auth.jwt.refresh-ttl-sec=1209600"
-})
+list.stream().map(...).toList();
 ```
 
-**Problema resolvido:** `Could not resolve placeholder 'app.auth.jwt.secret'` ao executar testes.
-
-**7. VS Code - Configuração de Indexação:**
-
-```json
-// ✅ .vscode/settings.json
-{
-  "files.watcherExclude": {
-    "**/target/**": true  // ✅ Evita indexar arquivos gerados (MapStruct)
-  },
-  "files.exclude": {
-    "**/target": true
-  }
-}
-```
-
-**Problema resolvido:** ~100 erros falsos de MapStruct no VS Code.
-
-**8. Markdown - Linting:**
-
-```markdown
-<!-- ✅ README_DEV.md - Removidas linhas em branco duplas -->
-```
-
-#### **📊 Impacto Técnico:**
-
-- **Modernização**: APIs atualizadas para versões mais recentes
-- **Compatibilidade**: Preparado para AOT/Native compilation
-- **Manutenibilidade**: Código mais limpo e idiomático
-- **Testes**: 100% passando (4/4)
-- **Documentação**: Gerada automaticamente em `target/spring-modulith-docs/`
-
-#### **📁 Arquivos Alterados:**
-
-1. `pom.xml` - Spring Boot 3.5.6 → 3.5.7
-2. `src/main/java/.../modules/users/internal/config/UsersConfig.java`
-3. `src/main/java/.../modules/auth/internal/security/AuthSecurityConfig.java`
-4. `src/main/java/.../modules/auth/internal/JwtTokenProvider.java`
-5. `src/main/java/.../config/CorsConfig.java`
-6. `src/main/java/.../modules/audit/web/admin/AdminAuditController.java`
-7. `src/test/java/.../PortalwebApplicationTests.java`
-8. `.vscode/settings.json`
-9. `docs/Dev/README_DEV.md`
-
-#### **✅ Resultados dos Testes:**
-
-```text
-[INFO] Tests run: 4, Failures: 0, Errors: 0, Skipped: 0
-
-✅ ModulithArchitectureTests (3 testes)
-   - verifyModularity
-   - documentModules
-   - verifyArchitecture
-
-✅ PortalwebApplicationTests (1 teste)
-   - contextLoads
-```
-
-#### **📄 Documentação Gerada:**
-
-Spring Modulith gerou automaticamente:
-
-- `target/spring-modulith-docs/components.puml` - Diagrama C4
-- `target/spring-modulith-docs/module-*.adoc` - Documentação de cada módulo
-- `target/spring-modulith-docs/module-*.puml` - Diagramas PlantUML
-
-#### **🔧 Comandos Úteis:**
-
-```bash
-# Executar testes
-mvn clean test
-
-# Gerar documentação Modulith
-mvn clean verify
-
-# Executar aplicação
-mvn spring-boot:run -Dspring-boot.run.profiles=dev
-
-# Validar código (Spotless)
-mvn spotless:check
-mvn spotless:apply
-```
-
-#### **✅ Status Final:**
-
-- **Spring Boot**: 3.5.7 ✅
-- **Testes**: 100% passando ✅
-- **APIs**: Modernizadas ✅
-- **Documentação**: Gerada ✅
-- **Warnings**: Todos corrigidos ✅
+Menos ruído, mesma funcionalidade, API moderna.
 
 ---
 
-## 🎯 **28/10/2025 - Correção de Dependências Modulares (Mídia e Corporate)**
+## 7. Logs, auditoria e observabilidade
 
-### ✅ **Implementado - Módulos**
+### 7.1. Logs
 
-#### **🔧 Correções de Arquitetura Modular**
+- Não logar:
+  - senhas,
+  - tokens JWT completos,
+  - dados sensíveis em texto puro.
+- Em operações críticas, logar:
+  - `usuario_id`, `empresa_id`, ação, timestamp.
+- Usar níveis adequados:
+  - `INFO` para fluxo normal relevante,
+  - `WARN`/`ERROR` para erros e situações anômalas,
+  - `DEBUG` restrito para diagnóstico em desenvolvimento.
 
-**1. Módulo Mídia - Remoção de Dependência Invertida:**
+### 7.2. Auditoria
 
-```java
-// ANTES (incorreto):
-@ApplicationModule(allowedDependencies = {"content"})
-
-// DEPOIS (correto):
-@ApplicationModule // Sem dependências - módulo autossuficiente
-```
-
-**Problema corrigido:**
-
-- ❌ **Dependência invertida**: Mídia não deve depender de Content
-- ❌ **Dependência fantasma**: Código não usa nada do módulo Content
-- ✅ **Arquitetura correta**: Módulo de infraestrutura autossuficiente
-
-**2. Módulo Corporate - Validação de Dependências:**
-
-```java
-// Mantido (correto):
-@ApplicationModule(allowedDependencies = {
-    "shared", "shared::mapper", "shared::dto", "modules.midia::domain"
-})
-```
-
-**Validação:**
-
-- ✅ **Nome lógico completo**: `modules.midia::domain` (como detectado pelo Spring Modulith)
-- ✅ **Derivação automática**: Spring Modulith usa o caminho completo do pacote como nome lógico
-- ✅ **Fronteiras respeitadas**: Acesso apenas à interface `domain` do módulo Mídia
-
-#### **📊 Impacto Técnico - Módulos:**
-
-- **Arquitetura**: Dependências corretas e unidirecionais
-- **Manutenibilidade**: Nomenclatura padronizada e consistente
-- **Qualidade**: Sem dependências não utilizadas (código limpo)
-- **Validação**: Testes de arquitetura garantem integridade
-
-#### **📁 Arquivos Alterados - Dependências:**
-
-1. `src/main/java/.../modules/midia/package-info.java`
-2. `src/main/java/.../modules/corporate/package-info.java`
-3. `docs/Módulos/Modulo_midia/Projeto_tecnico_midia.md`
-4. `GUIA_DESENVOLVIMENTO.md`
-
-#### **✅ Status Final - Dependências:**
-
-- **Correções aplicadas**: 100% concluídas
-- **Documentação**: Atualizada e sincronizada
-- **Testes**: Pendente de validação via `ModulithArchitectureTests`
+- Usar tabelas de auditoria (ex.: `audit_event` / `registro_auditoria`) para registrar ações importantes.
+- Sempre incluir `empresa_id` na auditoria quando o evento for multi-tenant.
 
 ---
 
-## 🎯 **28/10/2025 - Exposição do Domínio Mídia via Spring Modulith**
+## 8. Testes
 
-### ✅ Implementado - Named Interfaces
+### 8.1. Tipos de testes
 
-#### **🧩 Arquitetura Spring Modulith**
+- **Unitários**:
+  - Services, regras de negócio, helpers.
+- **De integração**:
+  - Controllers + services + repositories (com H2).
+- **Modulith / ArchUnit**:
+  - Garantir boundaries entre módulos.
+- **Multi-tenancy** (obrigatório em endpoints sensíveis):
+  - Usuário de empresa A não acessa dados de B.
+  - `switch-tenant` altera realmente o contexto.
 
-- **Exposição de Named Interfaces** no módulo Mídia
-- **Configuração de dependências** entre módulos  
-- **Validação de arquitetura** via testes automatizados
+### 8.2. Checklist mínimo antes de commitar
 
-#### **📁 Arquivos Criados/Modificados:**
-
-**1. Módulo Mídia - Configuração Principal:**
-
-```java
-// src/main/java/com/auditoria/portalweb/modules/midia/package-info.java
-@ApplicationModule(allowedDependencies = {"content"})
-```
-
-**2. Domínio Exposto:**
-
-```java
-// src/main/java/com/auditoria/portalweb/modules/midia/domain/package-info.java
-@NamedInterface("domain") 
-// Expõe: Media, MediaKind, MediaStorage
-```
-
-**3. API Preparada:**
-
-```java
-// src/main/java/com/auditoria/portalweb/modules/midia/api/package-info.java
-@NamedInterface("api")
-// Para DTOs e mappers futuros
-```
-
-**4. Módulo Corporate - Consumidor:**
-
-```java
-// src/main/java/com/auditoria/portalweb/modules/corporate/package-info.java
-@ApplicationModule(allowedDependencies = {
-    "shared", "shared::mapper", "shared::dto", "modules.midia::domain"
-})
-```
-
-**5. Correção de Violação Modular:**
-
-```java
-// src/main/java/.../corporate/service/EmpresaService.java
-// ❌ Removido: MediaRepository (violação modular)
-// ✅ Adicionado: EntityManager + em.getReference(Media.class, logoMediaId)
-```
-
-**6. Testes de Arquitetura:**
-
-```java  
-// src/test/java/.../ModulithArchitectureTests.java
-// ✅ Corrigido: import PortalwebApplication
-// ✅ Status: Todos os testes passando (3/3)
-```
-
-#### **🎯 Resultados Obtidos:**
-
-- **✅ Spring Modulith** detectando módulos corretamente
-- **✅ Interface domain** expondo entidades Media para Corporate
-- **✅ Fronteiras modulares** respeitadas (sem acessos indevidos)  
-- **✅ Relacionamentos JPA** funcionando via proxy EntityManager
-- **✅ Testes de arquitetura** validando dependências (0 erros)
-
-#### 📊 Impacto Técnico
-
-- **Modularidade**: Módulos bem definidos com interfaces claras
-- **Manutenibilidade**: Dependências explícitas e validadas
-- **Escalabilidade**: Base para futuras integrações modulares
-- **Qualidade**: Testes automatizados garantindo arquitetura
-
-#### **🔧 Comandos de Validação:**
-
-```bash
-# Executar testes de arquitetura
-./mvnw test -Dtest="*ArchitectureTests*"
-
-# Gerar documentação dos módulos  
-# Executado automaticamente nos testes
-# Saída: target/modulith-docs/
-```
-
-✅ Status Final:
-
-- **Implementação:** 100% concluída
-- **Testes:** Todos passando (3/3)  
-- **Documentação:** Atualizada e sincronizada
-- **Arquitetura:** Validada pelo Spring Modulith
+- [ ] `./mvnw test` está passando.
+- [ ] Não foi criado endpoint multi-tenant sem validação de tenant.
+- [ ] Não foi adicionada rota pública sem ser intencional (ver `TenantAccessFilter`).
+- [ ] Mudanças de banco foram refletidas nos scripts/documentação.
 
 ---
 
+## 9. Checklist para criar um novo módulo
+
+- [ ] Criou `modules.<nome>` com `api/application/domain/spi`?
+- [ ] Definiu claramente a responsabilidade do módulo?
+- [ ] Registrou `IMPLEMENTACAO_MODULO_<NOME>.md` em `docs/Modulos`?
+- [ ] Configurou o `package-info.java` com as dependências permitidas?
+- [ ] Evitou dependências diretas em entidades/repos/services de outros módulos?
+- [ ] Rodou `./mvnw test` (incluindo testes Modulith/ArchUnit)?
+
 ---
 
-> Este documento consolida o histórico recente e mantém apenas pendências **ativas** e resoluções com impacto técnico.
+## 10. Checklist para criar um novo endpoint multi-tenant
+
+- [ ] Endpoint recebe `tenantId` via `@AuthenticationPrincipal(expression = "tenantId")`?
+- [ ] Endpoint recebe `role` via `@AuthenticationPrincipal(expression = "role")` (se necessário)?
+- [ ] NÃO confia em `empresaId` vindo do cliente (path, query, DTO)?
+- [ ] Para não-super_admin, força `empresaId = tenantId`?
+- [ ] Para SUPER_ADMIN, tratamento específico (pode ver todos / escolher empresa)?
+- [ ] Service usa métodos de repository com `empresaId` (`findByIdAndEmpresaId`, etc.)?
+- [ ] Não há `findAll()` sem filtro em entidade multi-tenant?
+- [ ] Não expôs nada indevido em `PUBLIC_PATTERNS` (TenantAccessFilter)?
+- [ ] Há testes cobrindo:
+  - acesso permitido no tenant correto,
+  - acesso negado ao tentar usar outro tenant?
+
+---
+
+## 11. Histórico de ajustes importantes
+
+> Esta seção deve ser atualizada sempre que houver mudanças estruturais relevantes.
+
+- **2025-12-11** – Endurecimento de multi-tenancy:
+  - Correção do `JwtAuthenticationFilter` para usar `role` do JWT (contextual), com fallback seguro e reforço de `super_admin` pelo banco.
+  - Revisão completa dos controllers multi-tenant para parar de confiar em `empresaId` vindo do cliente.
+  - Ajustes em services/repositories (`findByIdAndEmpresaId`, `deleteByIdAndEmpresaId`, etc.) para reforçar o isolamento.
+  - Redução de rotas públicas em `TenantAccessFilter` (remoção de wildcards amplos como `/api/v1/empresas/**` e `/api/v1/pessoas/**`).
+- **2025-12-10** – Criação do `GUIA_DE_DESENVOLVIMENTO` unificado:
+  - Consolidação das boas práticas de módulos, multi-tenant, segurança e compatibilidade de código.
+  - Inclusão de seções “O que não fazer” (Beans antigos, JJWT legacy, Specifications confusas, Streams antigos).
+
+---
+
+> Este guia deve evoluir junto com o código.  
+> Sempre que uma regra importante for descoberta (como as correções de multi-tenancy e segurança), atualize este documento para que novos desenvolvedores não repitam erros antigos.
